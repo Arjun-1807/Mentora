@@ -3,25 +3,26 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { toast } from "sonner";
 import Navbar from "@/components/Navbar";
-import Card from "@/components/Card";
-import Badge from "@/components/Badge";
-import Spinner from "@/components/Spinner";
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Loader2 } from "lucide-react";
+import { matchMentors } from "@/lib/api";
 
 export default function ProfilePage() {
   const router = useRouter();
   const [profile, setProfile] = useState(null);
   const [hydrated, setHydrated] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
 
   useEffect(() => {
     try {
-      const raw = window.localStorage.getItem("mentora_profile");
-      if (raw) {
-        setProfile(JSON.parse(raw));
-      }
-    } catch (err) {
+      const raw = window.localStorage.getItem("startupProfile");
+      if (raw) setProfile(JSON.parse(raw));
+    } catch {
       setProfile(null);
     } finally {
       setHydrated(true);
@@ -31,27 +32,12 @@ export default function ProfilePage() {
   async function handleFindMentors() {
     if (!profile) return;
     setLoading(true);
-    setError("");
-
     try {
-      const res = await fetch("http://localhost:8000/match", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(profile),
-      });
-
-      if (!res.ok) {
-        throw new Error(`Request failed with status ${res.status}`);
-      }
-
-      const data = await res.json();
-      const matches = Array.isArray(data) ? data : data.matches || [];
-      window.localStorage.setItem("mentora_matches", JSON.stringify(matches));
+      const data = await matchMentors(profile);
+      window.localStorage.setItem("mentorMatches", JSON.stringify(data));
       router.push("/matches");
     } catch (err) {
-      setError(
-        "Something went wrong finding your mentors. Please try again."
-      );
+      toast.error(err.message || "Something went wrong finding your mentors.");
     } finally {
       setLoading(false);
     }
@@ -61,8 +47,23 @@ export default function ProfilePage() {
     return (
       <>
         <Navbar />
-        <main className="flex-1 flex items-center justify-center px-6 py-16">
-          <Spinner className="h-6 w-6 text-navy-100/60" />
+        <main className="flex-1 px-6 py-16">
+          <div className="max-w-3xl mx-auto">
+            <div className="mb-10 text-center">
+              <Skeleton className="h-9 w-72 mx-auto mb-3" />
+              <Skeleton className="h-5 w-96 mx-auto" />
+            </div>
+            <div className="grid sm:grid-cols-2 gap-6">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Card key={i}>
+                  <CardContent className="py-2">
+                    <Skeleton className="h-4 w-24 mb-4" />
+                    <Skeleton className="h-6 w-40" />
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </div>
         </main>
       </>
     );
@@ -74,19 +75,16 @@ export default function ProfilePage() {
         <Navbar />
         <main className="flex-1 flex items-center justify-center px-6 py-16">
           <Card className="max-w-md w-full text-center">
-            <h1 className="text-xl font-bold text-white mb-3">
-              No startup profile found
-            </h1>
-            <p className="text-navy-100/70 mb-6">
-              Upload a pitch deck first so we can build your startup
-              profile.
-            </p>
-            <Link
-              href="/upload"
-              className="inline-flex items-center justify-center rounded-xl bg-accent px-6 py-3 text-sm font-semibold text-navy-900 hover:bg-accent-light transition-colors"
-            >
-              Go to Upload
-            </Link>
+            <CardContent className="py-2">
+              <h1 className="text-xl font-bold text-foreground mb-3">
+                No startup profile found
+              </h1>
+              <p className="text-muted-foreground mb-6">
+                Upload a pitch deck first so we can build your startup
+                profile.
+              </p>
+              <Button render={<Link href="/upload" />}>Go to Upload</Button>
+            </CardContent>
           </Card>
         </main>
       </>
@@ -101,82 +99,92 @@ export default function ProfilePage() {
       <main className="flex-1 px-6 py-16">
         <div className="max-w-3xl mx-auto">
           <div className="mb-10 text-center">
-            <h1 className="text-3xl font-extrabold text-white mb-3">
+            <h1 className="text-3xl font-bold text-foreground mb-3">
               Your Startup Profile
             </h1>
-            <p className="text-navy-100/70">
+            <p className="text-muted-foreground">
               Here&apos;s what we extracted from your pitch deck.
             </p>
           </div>
 
-          <div className="grid sm:grid-cols-2 gap-6 mb-6">
-            <Card>
-              <h2 className="text-xs uppercase tracking-wide text-navy-100/50 mb-2">
-                Domain
-              </h2>
-              <p className="text-2xl font-bold text-white">
-                {domain || "Unknown"}
-              </p>
-            </Card>
-            <Card>
-              <h2 className="text-xs uppercase tracking-wide text-navy-100/50 mb-3">
-                Stage
-              </h2>
-              <Badge>{stage || "Unknown"}</Badge>
-            </Card>
-          </div>
-
           <div className="grid sm:grid-cols-2 gap-6 mb-10">
             <Card>
-              <h2 className="text-xs uppercase tracking-wide text-navy-100/50 mb-4">
-                Challenges
-              </h2>
-              {challenges.length ? (
-                <div className="flex flex-wrap gap-2">
-                  {challenges.map((c, i) => (
-                    <Badge key={i} tone="accent">
-                      {c}
-                    </Badge>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-sm text-navy-100/50">None identified.</p>
-              )}
+              <CardHeader>
+                <CardTitle className="text-xs uppercase tracking-wide text-muted-foreground">
+                  Domain
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-2xl font-bold text-foreground">
+                  {domain || "Unknown"}
+                </p>
+              </CardContent>
             </Card>
+
             <Card>
-              <h2 className="text-xs uppercase tracking-wide text-navy-100/50 mb-4">
-                Team Gaps
-              </h2>
-              {team_gaps.length ? (
-                <div className="flex flex-wrap gap-2">
-                  {team_gaps.map((g, i) => (
-                    <Badge key={i} tone="accent">
-                      {g}
-                    </Badge>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-sm text-navy-100/50">None identified.</p>
-              )}
+              <CardHeader>
+                <CardTitle className="text-xs uppercase tracking-wide text-muted-foreground">
+                  Stage
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <Badge>{stage || "Unknown"}</Badge>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-xs uppercase tracking-wide text-muted-foreground">
+                  Challenges
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {challenges.length ? (
+                  <ul className="list-disc pl-5 space-y-1 text-sm text-foreground">
+                    {challenges.map((c, i) => (
+                      <li key={i}>{c}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    None identified.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-xs uppercase tracking-wide text-muted-foreground">
+                  Team Gaps
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {team_gaps.length ? (
+                  <ul className="list-disc pl-5 space-y-1 text-sm text-foreground">
+                    {team_gaps.map((g, i) => (
+                      <li key={i}>{g}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    None identified.
+                  </p>
+                )}
+              </CardContent>
             </Card>
           </div>
 
-          {error && (
-            <div className="mb-6 rounded-lg border border-red-400/30 bg-red-400/10 px-4 py-3 text-sm text-red-300 text-center">
-              {error}
-            </div>
-          )}
-
           <div className="text-center">
-            <button
+            <Button
               type="button"
               onClick={handleFindMentors}
               disabled={loading}
-              className="inline-flex items-center justify-center gap-2 rounded-xl bg-accent px-8 py-3.5 text-base font-semibold text-navy-900 shadow-soft hover:bg-accent-light transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+              size="lg"
             >
-              {loading && <Spinner />}
-              {loading ? "Finding mentors..." : "Find Mentors"}
-            </button>
+              {loading && <Loader2 className="h-4 w-4 animate-spin" />}
+              {loading ? "Finding mentors..." : "Find My Mentors"}
+            </Button>
           </div>
         </div>
       </main>
