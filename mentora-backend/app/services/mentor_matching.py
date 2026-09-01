@@ -1,12 +1,24 @@
 """
 Mentor matching: queries MongoDB Atlas Vector Search for mentors whose
-embeddings are closest to the startup profile embedding, then applies a
-weighted score boost for domain/stage matches.
+embeddings are closest to the startup profile embedding, then combines
+similarity with several weighted match factors.
 
 Score convention: match_score is a float in the 0-1 range, computed as
-    clamp(cosine_similarity + boosts, 0.0, 1.0)
-where cosine_similarity itself is already in roughly [-1, 1] (in practice
-close to [0, 1] since embeddings are normalized and semantically related).
+
+    final_score = cosine_score * 0.5
+                + stage_match * 0.2
+                + domain_match * 0.15
+                + geography_match * 0.05
+                + effectiveness_score_normalized * 0.10
+
+where:
+  - cosine_score is the raw $vectorSearch score, clamped to [0, 1].
+  - stage_match is 1.0 if mentor.stage_focus == startup.stage, else 0.0.
+  - domain_match is 1.0 if mentor.domain == startup.domain (case-insensitive), else 0.0.
+  - geography_match is 1.0 if mentor.geography == startup.geography (case-insensitive,
+    both present), else 0.0.
+  - effectiveness_score_normalized = (mentor.effectiveness_score or 0.0) / 5.0
+    (mentors with no feedback yet contribute 0 here).
 """
 import logging
 from typing import List
@@ -20,12 +32,15 @@ from app.services.embeddings import build_startup_profile_text, embed_query
 
 logger = logging.getLogger(__name__)
 
-# --- Tunable weighted-boost constants -------------------------------------
-DOMAIN_MATCH_BOOST = 0.10
-STAGE_MATCH_BOOST = 0.10
+# --- Weighted-scoring formula weights --------------------------------------
+COSINE_WEIGHT = 0.5
+STAGE_MATCH_WEIGHT = 0.2
+DOMAIN_MATCH_WEIGHT = 0.15
+GEOGRAPHY_MATCH_WEIGHT = 0.05
+EFFECTIVENESS_WEIGHT = 0.10
 # ---------------------------------------------------------------------------
 
-# How many raw candidates to pull from vector search before boosting/re-ranking.
+# How many raw candidates to pull from vector search before re-ranking.
 VECTOR_SEARCH_CANDIDATE_LIMIT = 20
 TOP_K_RESULTS = 5
 
@@ -45,11 +60,13 @@ def _run_vector_search(embedding: List[float]) -> List[dict]:
         },
         {
             "$project": {
-                "_id": 0,
+                "_id": 1,
                 "name": 1,
                 "domain": 1,
                 "stage_focus": 1,
                 "expertise": 1,
+                "geography": 1,
+                "effectiveness_score": 1,
                 "score": {"$meta": "vectorSearchScore"},
             }
         },
@@ -84,23 +101,38 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
     if not candidates:
         return []
 
+    profile_domain = (profile.domain or "").strip().lower()
+    profile_stage = (profile.stage or "").strip().lower()
+    profile_geography = (profile.geography or "").strip().lower()
+
     ranked: List[MentorMatch] = []
     for candidate in candidates:
-        base_score = float(candidate.get("score", 0.0))
-        boost = 0.0
+        cosine_score = max(0.0, min(1.0, float(candidate.get("score", 0.0))))
 
         candidate_domain = (candidate.get("domain") or "").strip().lower()
         candidate_stage = (candidate.get("stage_focus") or "").strip().lower()
+        candidate_geography = (candidate.get("geography") or "").strip().lower()
+        candidate_effectiveness = candidate.get("effectiveness_score")
 
-        if candidate_domain and candidate_domain == profile.domain.strip().lower():
-            boost += DOMAIN_MATCH_BOOST
-        if candidate_stage and candidate_stage == profile.stage.strip().lower():
-            boost += STAGE_MATCH_BOOST
+        stage_match = 1.0 if candidate_stage and candidate_stage == profile_stage else 0.0
+        domain_match = 1.0 if candidate_domain and candidate_domain == profile_domain else 0.0
+        geography_match = (
+            1.0 if profile_geography and candidate_geography and candidate_geography == profile_geography else 0.0
+        )
+        effectiveness_score_normalized = (candidate_effectiveness or 0.0) / 5.0
 
-        final_score = max(0.0, min(1.0, base_score + boost))
+        final_score = (
+            cosine_score * COSINE_WEIGHT
+            + stage_match * STAGE_MATCH_WEIGHT
+            + domain_match * DOMAIN_MATCH_WEIGHT
+            + geography_match * GEOGRAPHY_MATCH_WEIGHT
+            + effectiveness_score_normalized * EFFECTIVENESS_WEIGHT
+        )
+        final_score = max(0.0, min(1.0, final_score))
 
         ranked.append(
             MentorMatch(
+                mentor_id=str(candidate.get("_id", "")),
                 name=candidate.get("name", "Unknown"),
                 domain=candidate.get("domain", "Unknown"),
                 stage_focus=candidate.get("stage_focus", "Unknown"),
