@@ -28,6 +28,7 @@ class MentorSeed(TypedDict):
     domain: str
     stage_focus: str
     expertise: List[str]
+    geography: str
 
 
 MENTORS: List[MentorSeed] = [
@@ -36,90 +37,105 @@ MENTORS: List[MentorSeed] = [
         "domain": "Fintech",
         "stage_focus": "idea",
         "expertise": ["Fundraising", "Product-Market Fit", "Regulatory Compliance"],
+        "geography": "San Francisco, CA",
     },
     {
         "name": "Marcus Reid",
         "domain": "Fintech",
         "stage_focus": "growth",
         "expertise": ["B2B Sales", "Go-to-Market", "Scaling Operations"],
+        "geography": "New York, NY",
     },
     {
         "name": "Priya Nair",
         "domain": "HealthTech",
         "stage_focus": "MVP",
         "expertise": ["Product-Market Fit", "Clinical Partnerships", "Regulatory Compliance"],
+        "geography": "Bangalore, India",
     },
     {
         "name": "David Okafor",
         "domain": "HealthTech",
         "stage_focus": "growth",
         "expertise": ["Fundraising", "Hiring", "Go-to-Market"],
+        "geography": "London, UK",
     },
     {
         "name": "Elena Petrova",
         "domain": "EdTech",
         "stage_focus": "idea",
         "expertise": ["Product-Market Fit", "User Research", "Curriculum Design"],
+        "geography": "Remote",
     },
     {
         "name": "Tom Sullivan",
         "domain": "EdTech",
         "stage_focus": "MVP",
         "expertise": ["Go-to-Market", "B2B Sales", "Partnerships"],
+        "geography": "Boston, MA",
     },
     {
         "name": "Sofia Marquez",
         "domain": "SaaS",
         "stage_focus": "MVP",
         "expertise": ["Technical Architecture", "Product-Market Fit", "Hiring"],
+        "geography": "Austin, TX",
     },
     {
         "name": "James Whitfield",
         "domain": "SaaS",
         "stage_focus": "growth",
         "expertise": ["B2B Sales", "Fundraising", "Scaling Operations"],
+        "geography": "New York, NY",
     },
     {
         "name": "Grace Kim",
         "domain": "E-commerce",
         "stage_focus": "idea",
         "expertise": ["Go-to-Market", "Branding", "Supply Chain"],
+        "geography": "Seoul, South Korea",
     },
     {
         "name": "Ben Alaoui",
         "domain": "E-commerce",
         "stage_focus": "growth",
         "expertise": ["Fundraising", "Scaling Operations", "B2B Sales"],
+        "geography": "Dubai, UAE",
     },
     {
         "name": "Nadia Hassan",
         "domain": "AI/ML",
         "stage_focus": "idea",
         "expertise": ["Technical Architecture", "Product-Market Fit", "Hiring"],
+        "geography": "Remote",
     },
     {
         "name": "Liam O'Connor",
         "domain": "AI/ML",
         "stage_focus": "MVP",
         "expertise": ["Fundraising", "Technical Architecture", "Go-to-Market"],
+        "geography": "Dublin, Ireland",
     },
     {
         "name": "Chloe Dubois",
         "domain": "Climate Tech",
         "stage_focus": "idea",
         "expertise": ["Fundraising", "Product-Market Fit", "Regulatory Compliance"],
+        "geography": "Paris, France",
     },
     {
         "name": "Ravi Deshmukh",
         "domain": "Climate Tech",
         "stage_focus": "growth",
         "expertise": ["Go-to-Market", "B2B Sales", "Scaling Operations"],
+        "geography": "Bangalore, India",
     },
     {
         "name": "Hannah Fischer",
         "domain": "SaaS",
         "stage_focus": "idea",
         "expertise": ["Product-Market Fit", "User Research", "Hiring"],
+        "geography": "Berlin, Germany",
     },
 ]
 
@@ -156,7 +172,11 @@ def main() -> None:
                 "domain": mentor["domain"],
                 "stage_focus": mentor["stage_focus"],
                 "expertise": mentor["expertise"],
+                "geography": mentor["geography"],
                 "embedding": embedding,
+                # No feedback yet for freshly seeded mentors; left unset until
+                # POST /feedback recomputes it as a rolling average rating.
+                "effectiveness_score": None,
             }
         )
         print(f"  [{i}/{len(MENTORS)}] Embedded mentor: {mentor['name']} ({mentor['domain']}, {mentor['stage_focus']})")
