@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import extract, match
+from app.routers import auth, email, extract, feedback, match
 
 app = FastAPI(
     title="Mentora API",
@@ -27,6 +27,9 @@ app.add_middleware(
 
 app.include_router(extract.router)
 app.include_router(match.router)
+app.include_router(email.router)
+app.include_router(feedback.router)
+app.include_router(auth.router)
 
 
 @app.get("/", tags=["health"])
