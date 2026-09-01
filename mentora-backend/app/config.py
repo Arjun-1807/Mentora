@@ -20,10 +20,18 @@ class Settings(BaseSettings):
     MONGODB_DB_NAME: str = "mentora"
     MONGODB_MENTORS_COLLECTION: str = "mentors"
     MONGODB_VECTOR_INDEX_NAME: str = "mentor_vector_index"
+    MONGODB_FEEDBACK_COLLECTION: str = "feedback"
+    MONGODB_MATCHES_COLLECTION: str = "matches"
+    MONGODB_USERS_COLLECTION: str = "users"
 
     # Embeddings
     EMBEDDING_MODEL_NAME: str = "BAAI/bge-base-en-v1.5"
     EMBEDDING_DIMENSIONS: int = 768
+
+    # Auth (JWT)
+    JWT_SECRET: str = ""
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRE_MINUTES: int = 60 * 24
 
     # CORS
     FRONTEND_ORIGIN: str = "http://localhost:3000"

@@ -23,3 +23,15 @@ def get_database() -> Database:
 
 def get_mentors_collection() -> Collection:
     return get_database()[settings.MONGODB_MENTORS_COLLECTION]
+
+
+def get_feedback_collection() -> Collection:
+    return get_database()[settings.MONGODB_FEEDBACK_COLLECTION]
+
+
+def get_matches_collection() -> Collection:
+    return get_database()[settings.MONGODB_MATCHES_COLLECTION]
+
+
+def get_users_collection() -> Collection:
+    return get_database()[settings.MONGODB_USERS_COLLECTION]
