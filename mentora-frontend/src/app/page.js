@@ -1,33 +1,68 @@
 import Link from "next/link";
 import Navbar from "@/components/Navbar";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "@/components/ui/card";
+import { UploadCloud, Sparkles, Send } from "lucide-react";
+
+const FEATURES = [
+  {
+    icon: UploadCloud,
+    title: "Ingest",
+    description: "Upload a pitch deck, we extract the startup profile.",
+  },
+  {
+    icon: Sparkles,
+    title: "Match",
+    description: "Vector search finds mentors whose expertise fits.",
+  },
+  {
+    icon: Send,
+    title: "Act",
+    description: "Send intro emails and track outcomes.",
+  },
+];
 
 export default function LandingPage() {
   return (
     <>
       <Navbar />
-      <main className="flex-1 flex items-center justify-center px-6">
-        <div className="max-w-2xl w-full text-center py-24">
-          <div className="inline-flex items-center gap-2 mb-8">
-            <span className="inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-accent/15 text-accent font-bold text-3xl">
-              M
-            </span>
+      <main className="flex-1 flex flex-col">
+        <section className="flex-1 flex items-center justify-center px-6 py-24 border-b border-border">
+          <div className="max-w-2xl w-full text-center">
+            <h1 className="text-5xl sm:text-6xl font-bold tracking-tight text-foreground mb-6">
+              Find the right mentor. Automatically.
+            </h1>
+            <p className="text-lg sm:text-xl text-muted-foreground mb-10 leading-relaxed">
+              Upload a pitch deck and Mentora extracts your startup profile,
+              matches you with mentors whose expertise fits, and drafts the
+              intro email — all in a few minutes.
+            </p>
+            <Button size="lg" render={<Link href="/upload" />}>
+              Get Matched
+            </Button>
           </div>
-          <h1 className="text-5xl sm:text-6xl font-extrabold tracking-tight text-white mb-6">
-            Mentora
-          </h1>
-          <p className="text-lg sm:text-xl text-navy-100/70 mb-12 leading-relaxed">
-            Find your perfect mentor, automatically.
-          </p>
-          <Link
-            href="/upload"
-            className="inline-flex items-center justify-center rounded-xl bg-accent px-8 py-4 text-base font-semibold text-navy-900 shadow-soft hover:bg-accent-light transition-colors"
-          >
-            Get Matched
-          </Link>
-          <p className="mt-6 text-sm text-navy-100/40">
-            Upload your pitch deck. We handle the rest.
-          </p>
-        </div>
+        </section>
+
+        <section className="px-6 py-20">
+          <div className="max-w-5xl mx-auto grid gap-6 sm:grid-cols-3">
+            {FEATURES.map(({ icon: Icon, title, description }) => (
+              <Card key={title}>
+                <CardHeader>
+                  <div className="mb-3 inline-flex h-10 w-10 items-center justify-center bg-primary/10 text-primary">
+                    <Icon className="h-5 w-5" />
+                  </div>
+                  <CardTitle className="text-lg">{title}</CardTitle>
+                  <CardDescription>{description}</CardDescription>
+                </CardHeader>
+              </Card>
+            ))}
+          </div>
+        </section>
       </main>
     </>
   );
