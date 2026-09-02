@@ -32,23 +32,28 @@ export default function LandingPage() {
     <>
       <Navbar />
       <main className="flex-1 flex flex-col">
-        <section className="flex-1 flex items-center justify-center px-6 py-24 border-b border-border">
+        <section className="flex-1 flex items-center justify-center px-4 sm:px-6 py-20 sm:py-24 border-b border-border">
           <div className="max-w-2xl w-full text-center">
-            <h1 className="text-5xl sm:text-6xl font-bold tracking-tight text-foreground mb-6">
+            <h1 className="text-4xl sm:text-6xl font-bold tracking-tight text-foreground mb-6">
               Find the right mentor. Automatically.
             </h1>
-            <p className="text-lg sm:text-xl text-muted-foreground mb-10 leading-relaxed">
+            <p className="text-base sm:text-xl text-muted-foreground mb-10 leading-relaxed">
               Upload a pitch deck and Mentora extracts your startup profile,
               matches you with mentors whose expertise fits, and drafts the
               intro email — all in a few minutes.
             </p>
-            <Button size="lg" render={<Link href="/upload" />}>
-              Get Matched
-            </Button>
+            <div className="flex flex-wrap items-center justify-center gap-3">
+              <Button size="lg" render={<Link href="/upload" />}>
+                Get Matched
+              </Button>
+              <Button size="lg" variant="outline" render={<Link href="/login" />}>
+                Sign In
+              </Button>
+            </div>
           </div>
         </section>
 
-        <section className="px-6 py-20">
+        <section className="px-4 sm:px-6 py-16 sm:py-20">
           <div className="max-w-5xl mx-auto grid gap-6 sm:grid-cols-3">
             {FEATURES.map(({ icon: Icon, title, description }) => (
               <Card key={title}>
