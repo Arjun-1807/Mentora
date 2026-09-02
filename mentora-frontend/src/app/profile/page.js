@@ -3,41 +3,68 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { toast } from "sonner";
-import Navbar from "@/components/Navbar";
+import AuthGuard from "@/components/AuthGuard";
+import { PageShell, PageHeader } from "@/components/PageShell";
+import { StateCard, InlineError } from "@/components/StateCard";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Loader2 } from "lucide-react";
+import { FileQuestion, Loader2, MapPin } from "lucide-react";
 import { matchMentors } from "@/lib/api";
+import { getStoredProfile, setStoredMatches } from "@/lib/storage";
 
-export default function ProfilePage() {
+function FieldCard({ label, children }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-xs uppercase tracking-wide text-muted-foreground">
+          {label}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>{children}</CardContent>
+    </Card>
+  );
+}
+
+function BulletList({ items, emptyLabel }) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return <p className="text-sm text-muted-foreground">{emptyLabel}</p>;
+  }
+  return (
+    <ul className="list-disc pl-5 space-y-1 text-sm text-foreground">
+      {items.map((item, i) => (
+        <li key={i} className="break-words">
+          {item}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function ProfilePageContent() {
   const router = useRouter();
   const [profile, setProfile] = useState(null);
   const [hydrated, setHydrated] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem("startupProfile");
-      if (raw) setProfile(JSON.parse(raw));
-    } catch {
-      setProfile(null);
-    } finally {
-      setHydrated(true);
-    }
+    setProfile(getStoredProfile());
+    setHydrated(true);
   }, []);
 
   async function handleFindMentors() {
-    if (!profile) return;
+    if (!profile || loading) return;
     setLoading(true);
+    setError("");
     try {
       const data = await matchMentors(profile);
-      window.localStorage.setItem("mentorMatches", JSON.stringify(data));
+      const matches = Array.isArray(data) ? data : data?.matches || [];
+      setStoredMatches(matches);
       router.push("/matches");
     } catch (err) {
-      toast.error(err.message || "Something went wrong finding your mentors.");
+      setError(err.message || "Something went wrong finding your mentors.");
     } finally {
       setLoading(false);
     }
@@ -45,149 +72,112 @@ export default function ProfilePage() {
 
   if (!hydrated) {
     return (
-      <>
-        <Navbar />
-        <main className="flex-1 px-6 py-16">
-          <div className="max-w-3xl mx-auto">
-            <div className="mb-10 text-center">
-              <Skeleton className="h-9 w-72 mx-auto mb-3" />
-              <Skeleton className="h-5 w-96 mx-auto" />
-            </div>
-            <div className="grid sm:grid-cols-2 gap-6">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <Card key={i}>
-                  <CardContent className="py-2">
-                    <Skeleton className="h-4 w-24 mb-4" />
-                    <Skeleton className="h-6 w-40" />
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          </div>
-        </main>
-      </>
+      <PageShell>
+        <div className="mb-10 text-center">
+          <Skeleton className="h-9 w-72 mx-auto mb-3" />
+          <Skeleton className="h-5 w-full max-w-md mx-auto" />
+        </div>
+        <div className="grid sm:grid-cols-2 gap-6">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Card key={i}>
+              <CardContent className="py-6">
+                <Skeleton className="h-4 w-24 mb-4" />
+                <Skeleton className="h-6 w-40" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      </PageShell>
     );
   }
 
   if (!profile) {
     return (
-      <>
-        <Navbar />
-        <main className="flex-1 flex items-center justify-center px-6 py-16">
-          <Card className="max-w-md w-full text-center">
-            <CardContent className="py-2">
-              <h1 className="text-xl font-bold text-foreground mb-3">
-                No startup profile found
-              </h1>
-              <p className="text-muted-foreground mb-6">
-                Upload a pitch deck first so we can build your startup
-                profile.
-              </p>
-              <Button render={<Link href="/upload" />}>Go to Upload</Button>
-            </CardContent>
-          </Card>
-        </main>
-      </>
+      <PageShell width="lg" center>
+        <StateCard
+          icon={FileQuestion}
+          title="No startup profile yet"
+          description="Upload a pitch deck and we'll extract your domain, stage, challenges and team gaps — that profile is what the mentor matching runs on."
+          actions={
+            <Button render={<Link href="/upload" />}>Upload a pitch deck</Button>
+          }
+        />
+      </PageShell>
     );
   }
 
-  const { domain, stage, challenges = [], team_gaps = [] } = profile;
+  const { domain, stage, challenges, team_gaps: teamGaps, geography } = profile;
 
   return (
-    <>
-      <Navbar />
-      <main className="flex-1 px-6 py-16">
-        <div className="max-w-3xl mx-auto">
-          <div className="mb-10 text-center">
-            <h1 className="text-3xl font-bold text-foreground mb-3">
-              Your Startup Profile
-            </h1>
-            <p className="text-muted-foreground">
-              Here&apos;s what we extracted from your pitch deck.
-            </p>
+    <PageShell>
+      <PageHeader
+        align="center"
+        title="Your startup profile"
+        description="Here's what we extracted from your pitch deck. Re-upload a deck if anything looks off."
+      />
+
+      <div className="grid gap-5 sm:grid-cols-2 mb-8">
+        <FieldCard label="Domain">
+          <p className="text-2xl font-bold text-foreground break-words">
+            {domain || "Unknown"}
+          </p>
+        </FieldCard>
+
+        <FieldCard label="Stage">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge>{stage || "Unknown"}</Badge>
+            {geography && (
+              <span className="inline-flex items-center gap-1 text-sm text-muted-foreground">
+                <MapPin className="h-3.5 w-3.5" aria-hidden="true" />
+                {geography}
+              </span>
+            )}
           </div>
+        </FieldCard>
 
-          <div className="grid sm:grid-cols-2 gap-6 mb-10">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-xs uppercase tracking-wide text-muted-foreground">
-                  Domain
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-2xl font-bold text-foreground">
-                  {domain || "Unknown"}
-                </p>
-              </CardContent>
-            </Card>
+        <FieldCard label="Challenges">
+          <BulletList items={challenges} emptyLabel="None identified in your deck." />
+        </FieldCard>
 
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-xs uppercase tracking-wide text-muted-foreground">
-                  Stage
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <Badge>{stage || "Unknown"}</Badge>
-              </CardContent>
-            </Card>
+        <FieldCard label="Team gaps">
+          <BulletList items={teamGaps} emptyLabel="None identified in your deck." />
+        </FieldCard>
+      </div>
 
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-xs uppercase tracking-wide text-muted-foreground">
-                  Challenges
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {challenges.length ? (
-                  <ul className="list-disc pl-5 space-y-1 text-sm text-foreground">
-                    {challenges.map((c, i) => (
-                      <li key={i}>{c}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="text-sm text-muted-foreground">
-                    None identified.
-                  </p>
-                )}
-              </CardContent>
-            </Card>
+      {error && (
+        <InlineError message={error} className="mb-6">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={handleFindMentors}
+            disabled={loading}
+          >
+            Try again
+          </Button>
+        </InlineError>
+      )}
 
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-xs uppercase tracking-wide text-muted-foreground">
-                  Team Gaps
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {team_gaps.length ? (
-                  <ul className="list-disc pl-5 space-y-1 text-sm text-foreground">
-                    {team_gaps.map((g, i) => (
-                      <li key={i}>{g}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="text-sm text-muted-foreground">
-                    None identified.
-                  </p>
-                )}
-              </CardContent>
-            </Card>
-          </div>
+      <div className="flex flex-col items-center gap-3">
+        <Button type="button" onClick={handleFindMentors} disabled={loading} size="lg">
+          {loading && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+          {loading ? "Finding mentors…" : "Find my mentors"}
+        </Button>
+        <Button variant="ghost" size="sm" render={<Link href="/upload" />}>
+          Upload a different deck
+        </Button>
+        <p aria-live="polite" className="sr-only">
+          {loading ? "Finding your mentor matches" : ""}
+        </p>
+      </div>
+    </PageShell>
+  );
+}
 
-          <div className="text-center">
-            <Button
-              type="button"
-              onClick={handleFindMentors}
-              disabled={loading}
-              size="lg"
-            >
-              {loading && <Loader2 className="h-4 w-4 animate-spin" />}
-              {loading ? "Finding mentors..." : "Find My Mentors"}
-            </Button>
-          </div>
-        </div>
-      </main>
-    </>
+export default function ProfilePage() {
+  return (
+    <AuthGuard>
+      <ProfilePageContent />
+    </AuthGuard>
   );
 }
