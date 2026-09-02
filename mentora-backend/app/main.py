@@ -4,17 +4,32 @@ Mentora backend - FastAPI application entrypoint.
 Run with:
     uvicorn app.main:app --reload --port 8000
 """
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.db.mongo import ensure_indexes
 from app.routers import auth, email, extract, feedback, match
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Create the MongoDB indexes the app relies on (idempotent)."""
+    ensure_indexes()
+    yield
+
 
 app = FastAPI(
     title="Mentora API",
     description="Startup-mentor matching backend: extracts structured startup "
     "profiles from pitch decks and matches them to mentors via vector search.",
-    version="1.0.0",
+    version="1.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
