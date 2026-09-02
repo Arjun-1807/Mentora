@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import Navbar from "@/components/Navbar";
+import AuthGuard from "@/components/AuthGuard";
+import { PageShell, PageHeader } from "@/components/PageShell";
+import { StateCard, InlineError } from "@/components/StateCard";
 import { Card, CardHeader, CardContent, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,8 +23,9 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { Mail, Copy } from "lucide-react";
-import { sendEmail } from "@/lib/api";
+import { Mail, Copy, ExternalLink, Loader2, UserSearch } from "lucide-react";
+import { draftIntroEmail, matchMentors } from "@/lib/api";
+import { getStoredMatches, getStoredProfile, setStoredMatches } from "@/lib/storage";
 
 function initialsFor(name) {
   if (!name) return "?";
@@ -31,11 +34,19 @@ function initialsFor(name) {
   return initials.join("") || "?";
 }
 
-function EmailDialog({ open, onOpenChange, mentor, startupProfile }) {
+function scorePercent(score) {
+  if (typeof score !== "number" || Number.isNaN(score)) return null;
+  return Math.round(Math.max(0, Math.min(100, score <= 1 ? score * 100 : score)));
+}
+
+function EmailDialog({ open, onOpenChange, mentor, startupProfile, onDrafted }) {
   const [loading, setLoading] = useState(false);
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [error, setError] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
+
+  const mentorName = mentor?.name || "this mentor";
 
   useEffect(() => {
     if (!open || !mentor) return;
@@ -46,11 +57,12 @@ function EmailDialog({ open, onOpenChange, mentor, startupProfile }) {
     setSubject("");
     setBody("");
 
-    sendEmail(startupProfile, mentor)
+    draftIntroEmail(startupProfile, mentor, mentor.match_id)
       .then((data) => {
         if (cancelled) return;
-        setSubject(data?.subject || `Introduction request for ${mentor.name || "you"}`);
+        setSubject(data?.subject || `Introduction request — ${mentor.name || "Mentora"}`);
         setBody(data?.body || "");
+        onDrafted?.(mentor);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -63,47 +75,55 @@ function EmailDialog({ open, onOpenChange, mentor, startupProfile }) {
     return () => {
       cancelled = true;
     };
-  }, [open, mentor, startupProfile]);
+    // `reloadKey` is the retry trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, mentor, startupProfile, reloadKey]);
+
+  const ready = !loading && !error;
 
   async function handleCopy() {
     try {
       await navigator.clipboard.writeText(`Subject: ${subject}\n\n${body}`);
-      toast.success("Copied to clipboard.");
+      toast.success("Draft copied to your clipboard.");
     } catch {
-      toast.error("Could not copy to clipboard.");
+      toast.error("Could not copy — select the text and copy manually.");
     }
   }
 
-  function handleSend() {
-    // Stub: no real email server exists yet, so we hand off to the user's
-    // mail client via a mailto: link pre-filled with the drafted content.
+  function handleOpenInMailClient() {
     const to = mentor?.email || "";
-    const params = new URLSearchParams({
-      subject,
-      body,
-    });
+    const params = new URLSearchParams({ subject, body });
     window.location.href = `mailto:${to}?${params.toString()}`;
-    toast.success("Opening your mail client (stub: no live email backend yet).");
   }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Send intro email</DialogTitle>
+          <DialogTitle>Intro email draft</DialogTitle>
           <DialogDescription>
-            Drafted for {mentor?.name || "this mentor"}. Feel free to edit
-            before sending.
+            Drafted for {mentorName}. Mentora never sends mail on your behalf —
+            edit this, then copy it or open it in your own mail client.
           </DialogDescription>
         </DialogHeader>
 
         {loading ? (
-          <div className="space-y-3">
+          <div className="space-y-3" role="status" aria-live="polite">
+            <span className="sr-only">Drafting your intro email</span>
             <Skeleton className="h-8 w-full" />
             <Skeleton className="h-32 w-full" />
           </div>
         ) : error ? (
-          <p className="text-sm text-destructive">{error}</p>
+          <InlineError message={error}>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => setReloadKey((k) => k + 1)}
+            >
+              Try again
+            </Button>
+          </InlineError>
         ) : (
           <div className="space-y-3">
             <div className="space-y-1.5">
@@ -123,22 +143,23 @@ function EmailDialog({ open, onOpenChange, mentor, startupProfile }) {
                 onChange={(e) => setBody(e.target.value)}
               />
             </div>
+            {!mentor?.email && (
+              <p className="text-xs text-muted-foreground">
+                We don&apos;t have an address for {mentorName}, so your mail
+                client will open with an empty “To” field.
+              </p>
+            )}
           </div>
         )}
 
         <DialogFooter>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={handleCopy}
-            disabled={loading || !!error}
-          >
-            <Copy className="h-4 w-4" />
-            Copy
+          <Button type="button" variant="outline" onClick={handleCopy} disabled={!ready}>
+            <Copy className="h-4 w-4" aria-hidden="true" />
+            Copy draft
           </Button>
-          <Button type="button" onClick={handleSend} disabled={loading || !!error}>
-            <Mail className="h-4 w-4" />
-            Send
+          <Button type="button" onClick={handleOpenInMailClient} disabled={!ready}>
+            <ExternalLink className="h-4 w-4" aria-hidden="true" />
+            Open in mail client
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -146,68 +167,122 @@ function EmailDialog({ open, onOpenChange, mentor, startupProfile }) {
   );
 }
 
-export default function MatchesPage() {
+function MatchesPageContent() {
   const [matches, setMatches] = useState(null);
   const [hydrated, setHydrated] = useState(false);
   const [startupProfile, setStartupProfile] = useState(null);
   const [activeMentor, setActiveMentor] = useState(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [rematching, setRematching] = useState(false);
+  const [error, setError] = useState("");
+  const [emailedIds, setEmailedIds] = useState(() => new Set());
 
   useEffect(() => {
-    try {
-      const rawMatches = window.localStorage.getItem("mentorMatches");
-      if (rawMatches) {
-        const parsed = JSON.parse(rawMatches);
-        setMatches(Array.isArray(parsed) ? parsed : parsed.matches || []);
-      }
-      const rawProfile = window.localStorage.getItem("startupProfile");
-      if (rawProfile) setStartupProfile(JSON.parse(rawProfile));
-    } catch {
-      setMatches(null);
-    } finally {
-      setHydrated(true);
-    }
+    setMatches(getStoredMatches());
+    setStartupProfile(getStoredProfile());
+    setHydrated(true);
   }, []);
+
+  const runMatch = useCallback(
+    async (profile) => {
+      if (!profile || rematching) return;
+      setRematching(true);
+      setError("");
+      try {
+        const data = await matchMentors(profile);
+        const list = Array.isArray(data) ? data : data?.matches || [];
+        setStoredMatches(list);
+        setMatches(list);
+        if (list.length === 0) {
+          toast.info("No mentors matched this profile yet.");
+        }
+      } catch (err) {
+        setError(err.message || "Could not refresh your mentor matches.");
+      } finally {
+        setRematching(false);
+      }
+    },
+    [rematching]
+  );
 
   function openEmailDialog(mentor) {
     setActiveMentor(mentor);
     setDialogOpen(true);
   }
 
+  const markEmailed = useCallback((mentor) => {
+    const key = mentor?.match_id || mentor?.mentor_id;
+    if (!key) return;
+    setEmailedIds((prev) => {
+      if (prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+  }, []);
+
   if (!hydrated) {
     return (
-      <>
-        <Navbar />
-        <main className="flex-1 px-6 py-16">
-          <div className="max-w-3xl mx-auto space-y-6">
-            {Array.from({ length: 3 }).map((_, i) => (
-              <Skeleton key={i} className="h-40 w-full" />
-            ))}
-          </div>
-        </main>
-      </>
+      <PageShell>
+        <div className="space-y-6">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Skeleton key={i} className="h-44 w-full" />
+          ))}
+        </div>
+      </PageShell>
     );
   }
 
   if (!matches || matches.length === 0) {
     return (
-      <>
-        <Navbar />
-        <main className="flex-1 flex items-center justify-center px-6 py-16">
-          <Card className="max-w-md w-full text-center">
-            <CardContent className="py-2">
-              <h1 className="text-xl font-bold text-foreground mb-3">
-                No mentor matches found
-              </h1>
-              <p className="text-muted-foreground mb-6">
-                Upload a pitch deck to get matched with mentors suited to your
-                startup.
-              </p>
-              <Button render={<Link href="/upload" />}>Go to Upload</Button>
-            </CardContent>
-          </Card>
-        </main>
-      </>
+      <PageShell width="lg" center>
+        <div className="space-y-4">
+          {error && (
+            <InlineError message={error}>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => runMatch(startupProfile)}
+                disabled={rematching}
+              >
+                Try again
+              </Button>
+            </InlineError>
+          )}
+          {startupProfile ? (
+            <StateCard
+              icon={UserSearch}
+              title="No mentor matches yet"
+              description="Your startup profile is ready — run the matching to see the mentors best suited to help you."
+              actions={
+                <>
+                  <Button
+                    type="button"
+                    onClick={() => runMatch(startupProfile)}
+                    disabled={rematching}
+                  >
+                    {rematching && (
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    )}
+                    {rematching ? "Finding mentors…" : "Find my mentors"}
+                  </Button>
+                  <Button variant="outline" render={<Link href="/profile" />}>
+                    Review profile
+                  </Button>
+                </>
+              }
+            />
+          ) : (
+            <StateCard
+              icon={UserSearch}
+              title="No mentor matches yet"
+              description="Upload a pitch deck first — matching runs on the startup profile we extract from it."
+              actions={<Button render={<Link href="/upload" />}>Upload a pitch deck</Button>}
+            />
+          )}
+        </div>
+      </PageShell>
     );
   }
 
@@ -215,93 +290,133 @@ export default function MatchesPage() {
 
   return (
     <>
-      <Navbar />
-      <main className="flex-1 px-6 py-16">
-        <div className="max-w-3xl mx-auto">
-          <div className="mb-10 text-center">
-            <h1 className="text-3xl font-bold text-foreground mb-3">
-              Your Top Mentor Matches
-            </h1>
-            <p className="text-muted-foreground">
-              Based on your startup profile, here are the mentors best suited
-              to help you.
-            </p>
-          </div>
+      <PageShell>
+        <PageHeader
+          align="center"
+          title="Your top mentor matches"
+          description="Ranked by fit with your startup profile. Draft an intro email to any of them — you stay in control of what actually gets sent."
+        />
 
-          <div className="grid gap-6">
-            {topMatches.map((mentor, i) => {
-              const rawScore =
-                typeof mentor.match_score === "number" ? mentor.match_score : 0;
-              const percent = Math.round(
-                Math.max(0, Math.min(100, rawScore <= 1 ? rawScore * 100 : rawScore))
-              );
+        {error && (
+          <InlineError message={error} className="mb-6">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => runMatch(startupProfile)}
+              disabled={rematching}
+            >
+              Try again
+            </Button>
+          </InlineError>
+        )}
 
-              return (
-                <Card key={i}>
-                  <CardHeader>
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="flex items-center gap-3">
-                        <Avatar size="lg">
-                          <AvatarFallback>
-                            {initialsFor(mentor.name)}
-                          </AvatarFallback>
-                        </Avatar>
-                        <div>
-                          <CardTitle className="text-lg">
-                            {mentor.name || "Unnamed mentor"}
-                          </CardTitle>
-                          <Badge variant="secondary" className="mt-1">
-                            {mentor.domain || "General"}
-                          </Badge>
+        <div className="grid gap-5">
+          {topMatches.map((mentor, i) => {
+            const percent = scorePercent(mentor.match_score);
+            const key = mentor.match_id || mentor.mentor_id || i;
+            const emailed = emailedIds.has(mentor.match_id || mentor.mentor_id);
+
+            return (
+              <Card key={key}>
+                <CardHeader>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <Avatar size="lg">
+                        <AvatarFallback>{initialsFor(mentor.name)}</AvatarFallback>
+                      </Avatar>
+                      <div className="min-w-0">
+                        <CardTitle className="text-lg truncate">
+                          {mentor.name || "Unnamed mentor"}
+                        </CardTitle>
+                        <div className="mt-1 flex flex-wrap items-center gap-2">
+                          <Badge variant="secondary">{mentor.domain || "General"}</Badge>
+                          {mentor.stage_focus && (
+                            <span className="text-xs text-muted-foreground">
+                              {mentor.stage_focus} stage
+                            </span>
+                          )}
+                          {emailed && (
+                            <Badge variant="outline">Draft opened</Badge>
+                          )}
                         </div>
                       </div>
-                      <span className="inline-flex items-center justify-center bg-muted h-8 w-8 text-sm font-semibold text-muted-foreground">
-                        #{i + 1}
-                      </span>
                     </div>
-                  </CardHeader>
-                  <CardContent>
-                    {Array.isArray(mentor.expertise) &&
-                      mentor.expertise.length > 0 && (
-                        <div className="flex flex-wrap gap-2 mb-5">
-                          {mentor.expertise.map((skill, idx) => (
-                            <Badge key={idx} variant="outline">
-                              {skill}
-                            </Badge>
-                          ))}
-                        </div>
-                      )}
+                    <span
+                      className="inline-flex items-center justify-center bg-muted h-8 w-8 shrink-0 text-sm font-semibold text-muted-foreground"
+                      aria-label={`Rank ${i + 1}`}
+                    >
+                      {i + 1}
+                    </span>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {Array.isArray(mentor.expertise) && mentor.expertise.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mb-5">
+                      {mentor.expertise.map((skill, idx) => (
+                        <Badge key={idx} variant="outline">
+                          {skill}
+                        </Badge>
+                      ))}
+                    </div>
+                  )}
 
-                    <div className="mb-1.5 flex items-center justify-between">
-                      <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                        Match score
-                      </span>
-                      <span className="text-sm font-semibold text-primary">
-                        {percent}%
-                      </span>
-                    </div>
-                    <Progress value={percent} />
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                      Match score
+                    </span>
+                    <span className="text-sm font-semibold text-primary">
+                      {percent === null ? "—" : `${percent}%`}
+                    </span>
+                  </div>
+                  <Progress
+                    value={percent ?? 0}
+                    aria-label={`Match score for ${mentor.name || "this mentor"}`}
+                  />
 
-                    <div className="mt-5 flex justify-end">
-                      <Button type="button" onClick={() => openEmailDialog(mentor)}>
-                        <Mail className="h-4 w-4" />
-                        Send Intro Email
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              );
-            })}
-          </div>
+                  <div className="mt-5 flex justify-end">
+                    <Button type="button" onClick={() => openEmailDialog(mentor)}>
+                      <Mail className="h-4 w-4" aria-hidden="true" />
+                      Draft intro email
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
         </div>
-      </main>
+
+        <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => runMatch(startupProfile)}
+            disabled={rematching || !startupProfile}
+          >
+            {rematching && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+            {rematching ? "Refreshing…" : "Refresh matches"}
+          </Button>
+          <Button variant="ghost" render={<Link href="/dashboard" />}>
+            View dashboard
+          </Button>
+        </div>
+      </PageShell>
 
       <EmailDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         mentor={activeMentor}
         startupProfile={startupProfile}
+        onDrafted={markEmailed}
       />
     </>
+  );
+}
+
+export default function MatchesPage() {
+  return (
+    <AuthGuard>
+      <MatchesPageContent />
+    </AuthGuard>
   );
 }
