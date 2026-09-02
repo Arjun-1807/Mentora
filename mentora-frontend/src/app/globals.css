@@ -115,6 +115,12 @@
   body {
     @apply bg-background text-foreground font-sans antialiased;
   }
+  /* Keyboard focus must stay visible on the dark theme even on elements that
+     don't carry their own focus ring (links, custom widgets). */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
   ::selection {
     background-color: var(--primary);
     color: var(--primary-foreground);

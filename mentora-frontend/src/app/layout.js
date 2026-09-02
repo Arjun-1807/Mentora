@@ -8,7 +8,10 @@ import { Toaster } from "@/components/ui/sonner";
 const geistSans = GeistSans;
 
 export const metadata = {
-  title: "Mentora",
+  title: {
+    default: "Mentora — mentor matching for early-stage startups",
+    template: "%s · Mentora",
+  },
   description:
     "Mentora matches early-stage startups with the mentors best suited to help them grow — automatically, from a single pitch deck.",
 };
