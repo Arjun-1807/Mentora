@@ -75,7 +75,11 @@ def _call_groq(startup_profile: StartupProfile, mentor: MentorMatch) -> str:
         )
     except Exception as exc:
         logger.exception("Groq API call failed")
-        raise HTTPException(status_code=502, detail=f"Groq API request failed: {exc}") from exc
+        # Generic client-facing message; the full error is in the logs.
+        raise HTTPException(
+            status_code=502,
+            detail="The language model service is temporarily unavailable. Please try again shortly.",
+        ) from exc
 
     content = completion.choices[0].message.content
     if not content:

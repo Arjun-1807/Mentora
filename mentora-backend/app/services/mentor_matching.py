@@ -75,14 +75,17 @@ def _run_vector_search(embedding: List[float]) -> List[dict]:
     try:
         return list(collection.aggregate(pipeline))
     except Exception as exc:
-        logger.exception("MongoDB Atlas Vector Search query failed")
+        # Log the full error server-side; return a generic message so that
+        # internal details (connection strings, driver internals) never
+        # reach the client.
+        logger.exception(
+            "MongoDB Atlas Vector Search query failed (index=%r, collection=%r)",
+            settings.MONGODB_VECTOR_INDEX_NAME,
+            settings.MONGODB_MENTORS_COLLECTION,
+        )
         raise HTTPException(
             status_code=502,
-            detail=(
-                "Vector search query failed. Ensure the 'mentor_vector_index' "
-                f"Atlas Search index exists on the '{settings.MONGODB_MENTORS_COLLECTION}' "
-                f"collection and the database is reachable. Details: {exc}"
-            ),
+            detail="Mentor search is temporarily unavailable. Please try again shortly.",
         ) from exc
 
 
