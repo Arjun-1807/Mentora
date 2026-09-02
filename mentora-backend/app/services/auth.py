@@ -11,24 +11,51 @@ from typing import Any, Dict
 
 import bcrypt
 import jwt
+from fastapi import HTTPException
 
 from app.config import settings
+from app.models.schemas import MAX_PASSWORD_BYTES, MIN_PASSWORD_LENGTH
 
 logger = logging.getLogger(__name__)
 
 
 def hash_password(password: str) -> str:
-    """Hash a plaintext password with bcrypt, returning a utf-8 string."""
-    hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+    """Hash a plaintext password with bcrypt, returning a utf-8 string.
+
+    bcrypt (4.x and later) *raises* on inputs longer than 72 bytes rather
+    than silently truncating them, and rejects empty/short passwords by
+    policy here, so both cases are turned into a clean 400 instead of an
+    unhandled 500.
+    """
+    encoded = password.encode("utf-8")
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be at least {MIN_PASSWORD_LENGTH} characters long.",
+        )
+    if len(encoded) > MAX_PASSWORD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Password is too long: bcrypt supports at most {MAX_PASSWORD_BYTES} "
+                "bytes (note that non-ASCII characters use several bytes each)."
+            ),
+        )
+
+    hashed = bcrypt.hashpw(encoded, bcrypt.gensalt())
     return hashed.decode("utf-8")
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    """Check a plaintext password against a bcrypt hash."""
+    """Check a plaintext password against a bcrypt hash.
+
+    Returns False (rather than raising) for a malformed hash or an
+    over-long password, so callers can answer with a uniform 401.
+    """
     try:
         return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
     except (ValueError, TypeError):
-        logger.warning("Malformed password hash encountered during verification")
+        logger.warning("Password verification failed: malformed hash or unsupported password length")
         return False
 
 
