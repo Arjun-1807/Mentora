@@ -1,9 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { toast } from "sonner";
-import Navbar from "@/components/Navbar";
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import AuthGuard from "@/components/AuthGuard";
+import { PageShell, PageHeader } from "@/components/PageShell";
+import { StateCard, InlineError } from "@/components/StateCard";
+import { StarRating } from "@/components/StarRating";
+import { Card, CardHeader, CardTitle, CardContent, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -25,66 +29,134 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { Star, Loader2 } from "lucide-react";
-import { getAllMatches, logFeedback } from "@/lib/api";
+import { Loader2, LayoutDashboard } from "lucide-react";
+import {
+  getAllMatches,
+  getFeedbackSummary,
+  listMentors,
+  logFeedback,
+} from "@/lib/api";
 
 const STATUS_VARIANT = {
   pending: "secondary",
+  emailed: "outline",
+  completed: "default",
+  // Legacy statuses, still rendered sensibly if older records show up.
   sent: "outline",
   accepted: "default",
   declined: "destructive",
-  completed: "default",
 };
 
-function StarRating({ value, onChange }) {
+const STATUS_LABEL = {
+  pending: "Pending",
+  emailed: "Emailed",
+  completed: "Completed",
+  sent: "Emailed",
+  accepted: "Accepted",
+  declined: "Declined",
+};
+
+/** Statuses that mean an intro email was drafted/handed off for this match. */
+const EMAILED_STATUSES = new Set(["emailed", "sent", "accepted", "declined", "completed"]);
+
+function statusOf(match) {
+  return String(match?.status || "pending").toLowerCase();
+}
+
+/**
+ * Reads whatever feedback is attached to a match record.
+ *
+ * `/matches/all` doesn't denormalize feedback onto the match documents today,
+ * so this reads the shapes it might (`feedback: {...}` or flat fields) and
+ * falls back to what we submitted in this session.
+ */
+function feedbackOf(match) {
+  const nested = match?.feedback && typeof match.feedback === "object" ? match.feedback : {};
+  const rating = [match?.rating, nested.rating].find(
+    (r) => typeof r === "number" && !Number.isNaN(r)
+  );
+  const attended = [match?.attended, nested.attended].find((a) => typeof a === "boolean");
+  return { rating: rating ?? null, attended: attended ?? null };
+}
+
+function scoreLabel(score) {
+  if (typeof score !== "number" || Number.isNaN(score)) return "—";
+  return `${Math.round(Math.max(0, Math.min(100, score <= 1 ? score * 100 : score)))}%`;
+}
+
+function timestampLabel(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+function StatCard({ label, value, hint, loading }) {
   return (
-    <div className="flex items-center gap-1">
-      {[1, 2, 3, 4, 5].map((n) => (
-        <button
-          key={n}
-          type="button"
-          onClick={() => onChange(n)}
-          className="p-0.5"
-          aria-label={`${n} star${n > 1 ? "s" : ""}`}
-        >
-          <Star
-            className={`h-5 w-5 ${
-              n <= value ? "fill-primary text-primary" : "text-muted-foreground"
-            }`}
-          />
-        </button>
-      ))}
-    </div>
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-xs uppercase tracking-wide text-muted-foreground">
+          {label}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {loading ? (
+          <Skeleton className="h-8 w-16" />
+        ) : (
+          <>
+            <p className="text-3xl font-bold text-foreground tabular-nums">{value}</p>
+            {hint && <p className="mt-1 text-xs text-muted-foreground">{hint}</p>}
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
-function LogOutcomeDialog({ open, onOpenChange, match, onSubmitted }) {
+function LogOutcomeDialog({ open, onOpenChange, match, mentorName, onSubmitted }) {
   const [attended, setAttended] = useState(false);
   const [rating, setRating] = useState(0);
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     if (open) {
       setAttended(false);
       setRating(0);
+      setError("");
     }
   }, [open]);
 
+  const missingIds = !match?.match_id || !match?.mentor_id;
+
   async function handleSubmit() {
-    if (!match) return;
+    if (!match || submitting) return;
+    if (rating < 1) {
+      setError("Pick a satisfaction rating from 1 to 5.");
+      return;
+    }
+    if (missingIds) {
+      setError("This match record is missing its ids, so feedback can't be linked to it.");
+      return;
+    }
+
     setSubmitting(true);
+    setError("");
     try {
-      const result = await logFeedback({
+      await logFeedback({
         match_id: match.match_id,
         mentor_id: match.mentor_id,
         attended,
         rating,
       });
       toast.success("Outcome logged.");
-      onSubmitted?.(match, result);
+      onSubmitted?.(match, { attended, rating });
       onOpenChange(false);
     } catch (err) {
-      toast.error(err.message || "Could not log this outcome.");
+      setError(err.message || "Could not log this outcome.");
     } finally {
       setSubmitting(false);
     }
@@ -96,30 +168,44 @@ function LogOutcomeDialog({ open, onOpenChange, match, onSubmitted }) {
         <DialogHeader>
           <DialogTitle>Log outcome</DialogTitle>
           <DialogDescription>
-            Record what happened with this match.
+            Record what happened with {mentorName || "this mentor"}. This feeds
+            back into how mentors are ranked, and can only be submitted once.
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-5">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-4">
             <Label htmlFor="attended-switch">Meeting attended</Label>
             <Switch
               id="attended-switch"
               checked={attended}
               onCheckedChange={setAttended}
+              disabled={submitting}
             />
           </div>
 
-          <div className="space-y-1.5">
-            <Label>Satisfaction rating</Label>
-            <StarRating value={rating} onChange={setRating} />
+          <div className="space-y-2">
+            <Label htmlFor="satisfaction-rating">Satisfaction rating</Label>
+            <StarRating
+              id="satisfaction-rating"
+              label="Satisfaction rating, 1 to 5 stars"
+              value={rating}
+              onChange={setRating}
+              disabled={submitting}
+            />
           </div>
+
+          {error && <InlineError message={error} />}
         </div>
 
         <DialogFooter>
-          <Button type="button" onClick={handleSubmit} disabled={submitting}>
-            {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-            Submit
+          <Button
+            type="button"
+            onClick={handleSubmit}
+            disabled={submitting || rating < 1}
+          >
+            {submitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+            {submitting ? "Submitting…" : "Submit"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -127,15 +213,21 @@ function LogOutcomeDialog({ open, onOpenChange, match, onSubmitted }) {
   );
 }
 
-export default function DashboardPage() {
+function DashboardPageContent() {
   const [matches, setMatches] = useState([]);
+  const [mentorNames, setMentorNames] = useState({});
+  const [mentorRatings, setMentorRatings] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [activeMatch, setActiveMatch] = useState(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
+    setError("");
+
     getAllMatches()
       .then((data) => {
         if (cancelled) return;
@@ -144,14 +236,57 @@ export default function DashboardPage() {
       })
       .catch((err) => {
         if (cancelled) return;
-        setError(err.message || "Could not load matches.");
+        setError(err.message || "Could not load your matches.");
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
+
+    // Both of these are optional enrichments: they resolve mentor names and
+    // per-mentor average ratings. If either endpoint is missing, the
+    // dashboard just shows ids and "—" instead of breaking.
+    listMentors()
+      .then((data) => {
+        if (cancelled) return;
+        const names = {};
+        for (const mentor of data?.mentors || []) {
+          if (mentor?.mentor_id) names[mentor.mentor_id] = mentor.name;
+        }
+        setMentorNames(names);
+      })
+      .catch(() => {});
+
+    getFeedbackSummary()
+      .then((data) => {
+        if (cancelled) return;
+        const ratings = {};
+        const names = {};
+        for (const row of data?.mentors || []) {
+          if (!row?.mentor_id) continue;
+          if (typeof row.average_rating === "number") {
+            ratings[row.mentor_id] = row.average_rating;
+          }
+          if (row.name) names[row.mentor_id] = row.name;
+        }
+        setMentorRatings(ratings);
+        // Only fills gaps — /mentors is the better name source when present.
+        setMentorNames((prev) => ({ ...names, ...prev }));
+      })
+      .catch(() => {});
+
     return () => {
       cancelled = true;
     };
+  }, [reloadKey]);
+
+  const handleSubmitted = useCallback((match, submitted) => {
+    setMatches((prev) =>
+      prev.map((m) =>
+        m.match_id === match.match_id
+          ? { ...m, status: "completed", feedback: submitted }
+          : m
+      )
+    );
   }, []);
 
   function openLogDialog(match) {
@@ -159,152 +294,216 @@ export default function DashboardPage() {
     setDialogOpen(true);
   }
 
-  const totalMatches = matches.length;
-  const emailsSent = matches.filter((m) =>
-    ["sent", "accepted", "declined", "completed"].includes((m.status || "").toLowerCase())
-  ).length;
-  const meetingsAccepted = matches.filter(
-    (m) => (m.status || "").toLowerCase() === "accepted"
-  ).length;
-  const ratings = matches
-    .map((m) => m.rating)
-    .filter((r) => typeof r === "number" && !Number.isNaN(r));
-  const avgSatisfaction = ratings.length
-    ? (ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1)
-    : "—";
+  const stats = useMemo(() => {
+    const total = matches.length;
+    const emailsSent = matches.filter((m) => EMAILED_STATUSES.has(statusOf(m))).length;
+    const completed = matches.filter((m) => statusOf(m) === "completed").length;
 
-  const stats = [
-    { label: "Total Matches", value: totalMatches },
-    { label: "Emails Sent", value: emailsSent },
-    { label: "Meetings Accepted", value: meetingsAccepted },
-    { label: "Avg Satisfaction", value: avgSatisfaction },
-  ];
+    const known = matches.map(feedbackOf);
+    const attendedKnown = known.filter((f) => f.attended !== null);
+    const attendedCount =
+      attendedKnown.filter((f) => f.attended).length +
+      matches.filter((m) => statusOf(m) === "accepted").length;
+
+    const ratings = known
+      .map((f) => f.rating)
+      .filter((r) => typeof r === "number" && r > 0);
+
+    // Fall back to the per-mentor averages for mentors this user completed a
+    // match with — the match records themselves don't carry the rating.
+    const fallbackRatings = ratings.length
+      ? []
+      : matches
+          .filter((m) => statusOf(m) === "completed")
+          .map((m) => mentorRatings[m.mentor_id])
+          .filter((r) => typeof r === "number" && r > 0);
+
+    const usedRatings = ratings.length ? ratings : fallbackRatings;
+    const avg = usedRatings.length
+      ? (usedRatings.reduce((a, b) => a + b, 0) / usedRatings.length).toFixed(1)
+      : null;
+
+    const attendanceKnown = attendedKnown.length > 0 || completed === 0;
+
+    return [
+      {
+        label: "Total matches",
+        value: total,
+        hint: total === 0 ? "Run a match to get started" : undefined,
+      },
+      {
+        label: "Emails drafted",
+        value: emailsSent,
+        hint: "Intro drafts handed off to you",
+      },
+      {
+        label: "Meetings attended",
+        value: attendanceKnown ? attendedCount : "—",
+        hint: attendanceKnown ? undefined : "Not reported on these records",
+      },
+      {
+        label: "Avg satisfaction",
+        value: avg ?? "—",
+        hint: avg ? "Out of 5" : "No feedback logged yet",
+      },
+    ];
+  }, [matches, mentorRatings]);
+
+  const showEmptyState = !loading && !error && matches.length === 0;
 
   return (
     <>
-      <Navbar />
-      <main className="flex-1 px-6 py-16">
-        <div className="max-w-5xl mx-auto">
-          <div className="mb-10">
-            <h1 className="text-3xl font-bold text-foreground mb-3">
-              Dashboard
-            </h1>
-            <p className="text-muted-foreground">
-              Track match outcomes across all your startups and mentors.
-            </p>
-          </div>
+      <PageShell width="full">
+        <PageHeader
+          title="Dashboard"
+          description="Every mentor match you've made, and how each one turned out."
+          actions={
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setReloadKey((k) => k + 1)}
+                disabled={loading}
+              >
+                {loading && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+                Refresh
+              </Button>
+              <Button size="sm" render={<Link href="/matches" />}>
+                View matches
+              </Button>
+            </>
+          }
+        />
 
-          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4 mb-10">
-            {stats.map((stat) => (
-              <Card key={stat.label}>
-                <CardHeader>
-                  <CardTitle className="text-xs uppercase tracking-wide text-muted-foreground">
-                    {stat.label}
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  {loading ? (
-                    <Skeleton className="h-8 w-16" />
-                  ) : (
-                    <p className="text-3xl font-bold text-foreground">
-                      {stat.value}
-                    </p>
-                  )}
-                </CardContent>
-              </Card>
-            ))}
-          </div>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
+          {stats.map((stat) => (
+            <StatCard key={stat.label} {...stat} loading={loading} />
+          ))}
+        </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>All matches</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {loading ? (
-                <div className="space-y-2">
-                  {Array.from({ length: 4 }).map((_, i) => (
-                    <Skeleton key={i} className="h-10 w-full" />
-                  ))}
-                </div>
-              ) : error ? (
-                <p className="text-sm text-destructive">{error}</p>
-              ) : matches.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No matches recorded yet.
-                </p>
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Match ID</TableHead>
-                      <TableHead>Mentor</TableHead>
-                      <TableHead>Score</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Timestamp</TableHead>
-                      <TableHead className="text-right">Action</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {matches.map((match) => {
-                      const status = (match.status || "pending").toLowerCase();
-                      return (
-                        <TableRow key={match.match_id}>
-                          <TableCell className="font-mono text-xs">
-                            {match.match_id}
-                          </TableCell>
-                          <TableCell>{match.mentor_id}</TableCell>
-                          <TableCell>
-                            {typeof match.score === "number"
-                              ? `${Math.round(
-                                  match.score <= 1 ? match.score * 100 : match.score
-                                )}%`
-                              : "—"}
-                          </TableCell>
-                          <TableCell>
-                            <Badge variant={STATUS_VARIANT[status] || "secondary"}>
-                              {status}
-                            </Badge>
-                          </TableCell>
-                          <TableCell className="text-muted-foreground">
-                            {match.timestamp
-                              ? new Date(match.timestamp).toLocaleString()
-                              : "—"}
-                          </TableCell>
-                          <TableCell className="text-right">
+        <Card>
+          <CardHeader>
+            <CardTitle>Match history</CardTitle>
+            <CardDescription>
+              Status moves from pending → emailed → completed as you draft the
+              intro and log the outcome.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {loading ? (
+              <div className="space-y-2">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <Skeleton key={i} className="h-10 w-full" />
+                ))}
+              </div>
+            ) : error ? (
+              <InlineError message={error}>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setReloadKey((k) => k + 1)}
+                >
+                  Try again
+                </Button>
+              </InlineError>
+            ) : showEmptyState ? (
+              <StateCard
+                icon={LayoutDashboard}
+                title="No matches recorded yet"
+                description="Upload a pitch deck and run the matching — every match shows up here so you can track the outcome."
+                actions={<Button render={<Link href="/upload" />}>Upload a pitch deck</Button>}
+                className="border-0 shadow-none bg-transparent"
+              />
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Mentor</TableHead>
+                    <TableHead>Score</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Rating</TableHead>
+                    <TableHead>Matched</TableHead>
+                    <TableHead className="text-right">Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {matches.map((match, i) => {
+                    const status = statusOf(match);
+                    const { rating } = feedbackOf(match);
+                    const name =
+                      match.mentor_name || mentorNames[match.mentor_id] || null;
+                    const done = status === "completed";
+
+                    return (
+                      <TableRow key={match.match_id || `${match.mentor_id}-${i}`}>
+                        <TableCell className="max-w-[16rem]">
+                          {name ? (
+                            <span className="truncate block">{name}</span>
+                          ) : (
+                            <span className="font-mono text-xs text-muted-foreground truncate block">
+                              {match.mentor_id || "unknown"}
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell className="tabular-nums">
+                          {scoreLabel(match.score ?? match.match_score)}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={STATUS_VARIANT[status] || "secondary"}>
+                            {STATUS_LABEL[status] || status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="tabular-nums">
+                          {typeof rating === "number" ? `${rating}/5` : "—"}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {timestampLabel(match.timestamp || match.updated_at)}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {done ? (
+                            <span className="text-xs text-muted-foreground">Logged</span>
+                          ) : (
                             <Button
                               type="button"
                               size="sm"
                               variant="outline"
                               onClick={() => openLogDialog(match)}
                             >
-                              Log Outcome
+                              Log outcome
                             </Button>
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      </main>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+      </PageShell>
 
       <LogOutcomeDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         match={activeMatch}
-        onSubmitted={(match, result) => {
-          setMatches((prev) =>
-            prev.map((m) =>
-              m.match_id === match.match_id
-                ? { ...m, status: "completed", rating: result?.new_effectiveness_score ?? m.rating }
-                : m
-            )
-          );
-        }}
+        mentorName={
+          activeMatch
+            ? activeMatch.mentor_name || mentorNames[activeMatch.mentor_id]
+            : null
+        }
+        onSubmitted={handleSubmitted}
       />
     </>
+  );
+}
+
+export default function DashboardPage() {
+  return (
+    <AuthGuard>
+      <DashboardPageContent />
+    </AuthGuard>
   );
 }
