@@ -28,6 +28,12 @@ with feedback that feeds back into ranking.
 - `POST /feedback` — attendance + 1-5 rating, recomputes the mentor's
   rolling-average `effectiveness_score`, completes the match.
 - `GET /feedback/summary` — per-mentor aggregate feedback stats.
+- `POST /feedback-status` — advance a match to `emailed` / `email_sent`
+  (the frontend calls it after actually delivering the intro email).
+- `PATCH /mentor/profile` — mentor onboarding: saves the full mentor
+  profile and re-embeds it for vector search.
+- `POST /evaluate` — retrieval metrics (precision@5, recall@5, MRR,
+  NDCG@5, mean cosine) of the matching pipeline against ground truth.
 
 ## 1. Install dependencies
 
@@ -148,7 +154,7 @@ failures are logged rather than fatal.
 
 | Collection | Index | Unique | Why |
 |---|---|---|---|
-| `users` | `email` | yes | Closes the register check-then-insert race; a `DuplicateKeyError` becomes a clean `400`. |
+| `users` | `email` | yes | Closes the register check-then-insert race; a `DuplicateKeyError` becomes a clean `409`. |
 | `matches` | `match_id` | yes | `match_id` is the handle `/email` and `/feedback` use. |
 | `matches` | `user_id, timestamp` | no | Per-user match listing (`/matches/all`). |
 | `matches` | `mentor_id` | no | Mentor-side match listing. |
@@ -162,11 +168,14 @@ failures are logged rather than fatal.
 python seed_mentors.py
 ```
 
-**This clears the `mentors` collection** and inserts 15 mentor profiles,
-each with a `BAAI/bge-base-en-v1.5` embedding computed from their
+This removes previously seeded mentors (every mentor document **without**
+a `user_id`) and inserts 15 mentor profiles, each with a
+`BAAI/bge-base-en-v1.5` embedding computed from their
 domain/stage_focus/expertise (passage-side, no query prefix — see
-"Embedding convention" below). It will also remove mentors created through
-`POST /register`, so don't run it on a database you care about.
+"Embedding convention" below), a fake contact `email`
+(`…@mentors.mentora.dev`), `preferred_stages` and `seeded: true`. Mentors
+created through `POST /register` are kept. Re-run it after upgrading so
+the seeded mentors pick up their `email` field.
 
 ## 6. Run the server
 
@@ -198,6 +207,19 @@ All endpoints except `/`, `/health`, `/register` and `/login` require
 `Authorization: Bearer <access_token>`. A missing, malformed, invalid or
 expired token returns `401`.
 
+**Error format.** Every error response is JSON with a human-readable
+`error` string, plus `detail` for backward compatibility:
+
+```json
+{ "error": "Account already exists.", "detail": "Account already exists." }
+```
+
+For request-validation failures (`422`), `error` is a joined readable
+message (e.g. `"rating: Input should be less than or equal to 5"`) and
+`detail` is FastAPI's list of per-field errors. Unhandled exceptions are
+logged and answered with a generic `500 {"error": "Internal server
+error."}` — tracebacks never reach the client.
+
 ### `POST /register`
 
 Auth: none. Body:
@@ -214,28 +236,24 @@ Auth: none. Body:
 - `password`: minimum 8 characters, maximum 72 **bytes** (bcrypt's hard
   limit — longer passwords are rejected with `422` rather than 500-ing).
 - `role`: `"startup"` or `"mentor"`.
-- For `role: "mentor"`, `profile` is validated and requires:
+- For `role: "mentor"`, `profile` is validated and requires only a
+  `name` and at least one `sector_expertise` entry (a list, or a
+  comma-separated string):
   ```json
-  {
-    "name": "Ada Mentor",
-    "domain": "Fintech",
-    "stage_focus": "MVP",
-    "expertise": ["Fundraising", "Go-to-Market"],
-    "geography": "Remote",
-    "sector_expertise": null,
-    "past_exits": null,
-    "availability": null
-  }
+  { "name": "Ada Mentor", "sector_expertise": ["FinTech", "SaaS"] }
   ```
-  `stage_focus` must be one of `idea` / `MVP` / `growth`, and `expertise`
-  must have at least one non-empty entry — otherwise `422`. A mentor
+  Everything else is optional: `domain` defaults to the first sector,
+  `expertise` to the sectors, `stage_focus` (`idea` / `MVP` / `growth` /
+  `all`) to `all`. The rest of the profile is collected by the onboarding
+  flow (`PATCH /mentor/profile`). The mentor document also stores the
+  registering `email` and `onboarding_completed: false`. A mentor
   registration inserts the mentor document **first**, then the user, and
   rolls the mentor document back if the user insert fails, so a failure
   can never leave an orphaned account. The two are cross-linked:
   `users.mentor_id` and `mentors.user_id`.
 - Response `200`: `{"access_token": "<jwt>", "token_type": "bearer"}`
-- Errors: `400` duplicate email, `422` invalid payload / mentor profile,
-  `502` database failure.
+- Errors: `409` `"Account already exists."`, `422` invalid payload /
+  mentor profile, `502` database failure.
 
 ### `POST /login`
 
@@ -279,11 +297,13 @@ Auth: required. Rate-limited per user. `multipart/form-data`, field name
     "geography": "San Francisco, CA"
   }
   ```
-- Errors: `400` non-PDF, empty or corrupt/password-protected file; `413`
-  larger than `MAX_UPLOAD_BYTES`; `422` no extractable text (scanned /
-  image-only deck — the message says to export a text PDF or run OCR);
-  `429` rate-limited; `500` `GROQ_API_KEY` missing; `502` Groq
-  unavailable or unparseable after one retry.
+- Errors: `400` `"Only PDF files are accepted"`, empty or
+  corrupt/password-protected file; `413` larger than `MAX_UPLOAD_BYTES`;
+  `422` `"Deck appears to be image-based or empty. Please upload a
+  text-based PDF."` when fewer than 100 characters of text can be
+  extracted; `429` rate-limited; `500` `GROQ_API_KEY` missing, or the
+  model's output failed validation twice (the retry uses a stricter
+  prompt at temperature 0); `502` Groq unavailable.
 
 ### `POST /match`
 
@@ -310,7 +330,10 @@ Auth: required. Body shaped like the `/extract` response:
         "stage_focus": "MVP",
         "expertise": ["Fundraising", "Product-Market Fit"],
         "match_score": 0.8712,
-        "match_id": "0fbb6ece-12d5-4461-8fad-30bc79836ed7"
+        "match_id": "0fbb6ece-12d5-4461-8fad-30bc79836ed7",
+        "email": "ava.chen@mentors.mentora.dev",
+        "geography": "San Francisco, CA",
+        "similarity": 0.8231
       }
     ]
   }
@@ -323,6 +346,10 @@ Auth: required. Body shaped like the `/extract` response:
   `match_id` and `status`) instead of duplicating history and
   double-counting dashboard stats.
 - `match_id` is the handle to pass to `/email` and `/feedback`.
+- `similarity` is the raw clamped cosine score; `email` is the mentor's
+  contact address (if known).
+- Errors: `404` `"No mentor profiles found. Please seed the database."`
+  when the mentors collection is empty.
 - Errors: `401`, `422` invalid profile, `502` vector search unavailable
   (the client sees a generic message; details go to the server log).
 
@@ -383,8 +410,9 @@ so existing callers keep working. When present and owned by the caller,
 the match advances to status `emailed`.
 
 - Response `200`: `{"subject": "...", "body": "..."}`
-- Errors: `401`, `422`, `429`, `500` missing `GROQ_API_KEY`, `502` Groq
-  unavailable/unparseable.
+- Errors: `401`, `422`, `429`, `503` `"Email generation unavailable.
+  Please try again."` for any generation failure (missing
+  `GROQ_API_KEY`, Groq error, unusable output after one retry).
 
 ### `POST /feedback`
 
@@ -419,8 +447,91 @@ document into Python), `feedback_count` is updated, and the match
 advances to `completed`.
 
 - Response `200`: `{"success": true, "new_effectiveness_score": 4.0}`
-- Errors: `400`, `401`, `403`, `404`, `409`, `422` (rating outside 1-5),
-  `502`.
+- Errors: `400`, `401`, `403`, `404`, `409`, `422` (`rating` must be a
+  strict integer 1-5 and `attended` a strict JSON boolean — `"3"`, `3.5`,
+  `"true"` and `1` are all rejected), `502`.
+
+### `POST /feedback-status`
+
+Auth: required. Body: `{"match_id": "...", "status": "email_sent"}`.
+`status` may only be `emailed` or `email_sent` (`completed` is reachable
+only through `POST /feedback`) — anything else is `422`.
+
+Forward-only and idempotent: requesting a status the match already
+reached or passed returns `200` without changing it. Moving to
+`email_sent` also stamps `email_sent_at`.
+
+- Response `200`: `{"success": true, "match_id": "...", "status": "email_sent"}`
+  (`status` is what is stored after the call).
+- Errors: `401`, `403` not your match, `404` unknown match, `422`.
+
+### `PATCH /mentor/profile`
+
+Auth: required, `role` must be `mentor` (else `403`). Body:
+
+```json
+{
+  "name": "Ada Mentor",
+  "linkedin_url": "https://www.linkedin.com/in/ada",
+  "bio": "Up to 300 characters.",
+  "geography": "Bangalore",
+  "sector_expertise": ["FinTech", "SaaS"],
+  "years_experience": "10+",
+  "past_exits": "Exited Series B SaaS startup in 2021",
+  "preferred_stages": ["MVP", "growth"],
+  "max_startups_per_month": "2",
+  "availability": "Weekends"
+}
+```
+
+Allowed values: `geography` ∈ Bangalore, Mumbai, Delhi, Hyderabad,
+Chennai, Other; `sector_expertise` (≥ 1) ⊆ Clean Energy, EdTech, FinTech,
+HealthTech, AgriTech, SaaS, D2C, DeepTech, Logistics, Others;
+`years_experience` ∈ `1-3`, `3-5`, `5-10`, `10+`; `preferred_stages`
+(≥ 1) ⊆ `idea`, `MVP`, `growth`, `all`; `max_startups_per_month` ∈ `1`,
+`2`, `3`, `5+`; `availability` ∈ Weekdays, Weekends, Flexible.
+`linkedin_url` (optional) must be http(s); `bio` and `past_exits` are
+optional, max 300 characters.
+
+The mentor document gets `domain = sector_expertise[0]`,
+`expertise = sector_expertise`, `stage_focus` = the single chosen stage
+(or `all`), a fresh embedding (bio / past exits / experience included in
+the embedded text), and `onboarding_completed: true`; the profile is
+mirrored onto `users.profile`.
+
+- Response `200`: `{"success": true, "mentor_id": "...", "profile": {...}}`
+- Errors: `401`, `403`, `404` no linked mentor document, `422`, `502`.
+
+### `POST /evaluate`
+
+Auth: required. Body:
+
+```json
+{
+  "startup_profile": { "...": "as for /match" },
+  "ground_truth_mentor_ids": ["6a97...", "6a98..."]
+}
+```
+
+Runs the matching pipeline (without recording match history) and scores
+the top 5 with binary relevance (`app/services/evaluation.py`):
+precision@5 = hits / 5; recall@5 = hits / |ground truth|; MRR = 1 / rank
+of the first relevant mentor; NDCG@5 = DCG / IDCG with
+`DCG = Σ rel_i / log2(i + 1)`; `avg_match_score` = mean raw cosine
+similarity of the top 5.
+
+- Response `200`:
+  ```json
+  {
+    "precision_at_5": 0.4,
+    "recall_at_5": 0.6667,
+    "mrr": 0.5,
+    "ndcg_at_5": 0.4982,
+    "avg_match_score": 0.7,
+    "top_5_mentor_ids": ["...", "..."]
+  }
+  ```
+- Errors: `401`, `404` no mentors, `422` (e.g. empty ground truth), `502`.
 
 ### `GET /feedback/summary`
 
@@ -453,6 +564,7 @@ forwards** and only for the owning user (`app/services/matches.py`):
 |---|---|---|
 | `pending` | `POST /match` (on insert) | Matched, no outreach yet. |
 | `emailed` | `POST /email` with a `match_id` | An intro email was drafted for this match. |
+| `email_sent` | `POST /feedback-status` | The intro email was actually delivered (also sets `email_sent_at`). |
 | `completed` | `POST /feedback` | Feedback recorded; the loop is closed. |
 
 `advance_match_status()` only updates a match whose current status is
@@ -487,8 +599,9 @@ final_score = cosine_score              * 0.50
 ```
 
   - `cosine_score` — the raw `$vectorSearch` score, clamped to `[0, 1]`.
-  - `stage_match` — 1.0 if `mentor.stage_focus == startup.stage`
-    (case-insensitive), else 0.0.
+  - `stage_match` — 1.0 if `mentor.stage_focus == startup.stage`, or the
+    startup's stage is in `mentor.preferred_stages`, or the mentor covers
+    `all` stages (all case-insensitive), else 0.0.
   - `domain_match` — 1.0 if `mentor.domain == startup.domain`
     (case-insensitive), else 0.0.
   - `geography_match` — 1.0 if both sides have a geography and they match
@@ -539,7 +652,9 @@ mentora-backend/
       extract.py              # POST /extract
       match.py                # POST /match, POST /matches/all, GET /mentors
       email.py                # POST /email
-      feedback.py             # POST /feedback, GET /feedback/summary
+      feedback.py             # POST /feedback, POST /feedback-status, GET /feedback/summary
+      mentor.py               # PATCH /mentor/profile (mentor onboarding)
+      evaluate.py             # POST /evaluate (retrieval metrics)
     services/
       pdf_extract.py          # PyMuPDF text extraction + size cap
       llm.py                  # Groq profile extraction (prompt + JSON validation)
@@ -547,6 +662,7 @@ mentora-backend/
       embeddings.py           # sentence-transformers BGE wrapper (singleton)
       mentor_matching.py      # Atlas $vectorSearch query + weighted re-rank
       matches.py              # match de-duplication + status lifecycle
+      evaluation.py           # precision/recall/MRR/NDCG metric functions
       auth.py                 # bcrypt hashing + JWT issue/verify
       auth_dependency.py      # get_current_user bearer-token dependency
       rate_limit.py           # in-process sliding-window rate limiting
@@ -567,11 +683,13 @@ mentora-backend/
   and the seed script — no `motor`/async driver is mixed in.
 - The Groq calls request JSON mode (`response_format={"type":
   "json_object"}`) and defensively re-validate the result against a
-  Pydantic model, retrying once on malformed/invalid JSON before raising
-  a `502`.
+  Pydantic model, retrying once on malformed/invalid JSON (with a stricter
+  prompt for `/extract`) before failing (`500` for `/extract`, `503` for
+  `/email`).
 - Rate limiting is per-process (see Security notes).
-- `/email` only *drafts* an email; nothing is actually sent, so `emailed`
-  means "an intro email was generated for this match".
+- `/email` only *drafts* an email; delivery happens in the frontend
+  (Resend, via its `/api/send-email` route), which then calls
+  `POST /feedback-status` to move the match to `email_sent`.
 - Network calls to Groq and MongoDB Atlas only succeed once you've
   supplied real credentials in `.env` and created the Atlas Vector Search
   index described above.
