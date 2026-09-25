@@ -81,17 +81,36 @@ export function clearSession() {
 
 /* ------------------------------------------------------------- cached data */
 
-/** The startup profile extracted from the pitch deck, or `null`. */
+/**
+ * True for an object shaped like the backend's StartupProfile: a non-empty
+ * `domain`/`stage` string and (when present) array-valued lists.
+ */
+export function isValidProfile(profile) {
+  if (!profile || typeof profile !== "object" || Array.isArray(profile)) return false;
+  if (typeof profile.domain !== "string" || !profile.domain.trim()) return false;
+  if (typeof profile.stage !== "string" || !profile.stage.trim()) return false;
+  for (const key of ["challenges", "team_gaps"]) {
+    if (profile[key] !== undefined && !Array.isArray(profile[key])) return false;
+  }
+  return true;
+}
+
+/** The startup profile extracted from the pitch deck, or `null` if missing/malformed. */
 export function getStoredProfile() {
   const profile = readJson(STARTUP_PROFILE_KEY);
-  return profile && typeof profile === "object" ? profile : null;
+  return isValidProfile(profile) ? profile : null;
 }
 
 export function setStoredProfile(profile) {
   write(STARTUP_PROFILE_KEY, JSON.stringify(profile));
 }
 
-/** The mentor matches from /match, always normalized to an array. */
+/**
+ * The mentor matches from /match, normalized to an array.
+ *
+ * `null` means matching has never run for the current profile (the key is
+ * missing); `[]` means it ran and found nothing — pages treat those differently.
+ */
 export function getStoredMatches() {
   const stored = readJson(MENTOR_MATCHES_KEY);
   if (Array.isArray(stored)) return stored;
@@ -101,4 +120,9 @@ export function getStoredMatches() {
 
 export function setStoredMatches(matches) {
   write(MENTOR_MATCHES_KEY, JSON.stringify(matches));
+}
+
+/** Forgets the cached matches (e.g. a new deck was uploaded). */
+export function clearStoredMatches() {
+  remove(MENTOR_MATCHES_KEY);
 }

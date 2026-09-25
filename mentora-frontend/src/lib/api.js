@@ -1,10 +1,14 @@
 // Single source of truth for all backend API calls.
+import { toast } from "sonner";
 import { clearToken, getToken } from "@/lib/storage";
 
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
-/** Error thrown by every failed request; carries the HTTP status. */
+/** Shown (once, de-duplicated) whenever the backend can't be reached at all. */
+export const SERVER_UNAVAILABLE_MESSAGE = "Server unavailable. Please try again shortly.";
+
+/** Error thrown by every failed request; carries the HTTP status (0 = network). */
 export class ApiError extends Error {
   constructor(message, status, payload) {
     super(message);
@@ -62,6 +66,7 @@ function messageFromPayload(payload, status) {
   if (status === 401) return "Your session has expired. Please sign in again.";
   if (status === 403) return "You don't have access to that.";
   if (status === 404) return "Not found.";
+  if (status === 409) return "Account already exists.";
   if (status === 413) return "That file is too large.";
   if (status >= 500) return "The server hit an error. Please try again.";
   return `Request failed with status ${status}`;
@@ -91,10 +96,12 @@ async function request(
       body: body === undefined ? undefined : isFormData ? body : JSON.stringify(body),
     });
   } catch {
-    throw new ApiError(
-      "Could not reach the Mentora server. Check your connection and try again.",
-      0
-    );
+    // Network failure / backend down. Toast here, once, so every caller gets
+    // the same feedback; the fixed id stops parallel requests stacking toasts.
+    if (typeof window !== "undefined") {
+      toast.error(SERVER_UNAVAILABLE_MESSAGE, { id: "server-unavailable" });
+    }
+    throw new ApiError(SERVER_UNAVAILABLE_MESSAGE, 0);
   }
 
   if (res.ok) {
@@ -135,14 +142,77 @@ export function matchMentors(profile) {
 /**
  * Asks the backend to draft an intro email for a startup/mentor pair.
  *
- * Nothing is delivered here — the response is a draft the founder sends from
- * their own mail client. When `matchId` is supplied the backend also advances
- * that match's lifecycle to `emailed`, which is what the dashboard reports.
+ * Nothing is delivered here — delivery goes through `sendEmail` once the
+ * founder has reviewed the draft. When `matchId` is supplied the backend also
+ * advances that match's lifecycle to `emailed`.
  */
 export function draftIntroEmail(startupProfile, mentor, matchId) {
   const body = { startup_profile: startupProfile, mentor };
   if (matchId) body.match_id = matchId;
   return request("/email", { method: "POST", body });
+}
+
+/**
+ * Delivers an email through the Next.js `/api/send-email` route (Resend).
+ *
+ * That route lives on the frontend origin, not the FastAPI backend, but it
+ * checks the same bearer token (against `/me`) so it can't be used as an
+ * open relay.
+ */
+export async function sendEmail({ to, subject, body }) {
+  const headers = { "Content-Type": "application/json" };
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  let res;
+  try {
+    res = await fetch("/api/send-email", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ to, subject, body }),
+    });
+  } catch {
+    toast.error(SERVER_UNAVAILABLE_MESSAGE, { id: "server-unavailable" });
+    throw new ApiError(SERVER_UNAVAILABLE_MESSAGE, 0);
+  }
+
+  let payload = null;
+  try {
+    payload = await res.json();
+  } catch {
+    // ignore — handled below
+  }
+  if (!res.ok) {
+    throw new ApiError(messageFromPayload(payload, res.status), res.status, payload);
+  }
+  return payload;
+}
+
+/**
+ * Advances a match's lifecycle status (`emailed` or `email_sent`).
+ * The backend only ever moves a match forwards, so this is safe to repeat.
+ */
+export function updateMatchStatus(matchId, status) {
+  return request("/feedback-status", {
+    method: "POST",
+    body: { match_id: matchId, status },
+  });
+}
+
+/** Saves the mentor onboarding profile (re-embeds it for matching). */
+export function updateMentorProfile(profile) {
+  return request("/mentor/profile", { method: "PATCH", body: profile });
+}
+
+/** Runs the retrieval evaluation (Precision@5, Recall@5, MRR, NDCG@5…). */
+export function runEvaluation(startupProfile, groundTruthMentorIds) {
+  return request("/evaluate", {
+    method: "POST",
+    body: {
+      startup_profile: startupProfile,
+      ground_truth_mentor_ids: groundTruthMentorIds,
+    },
+  });
 }
 
 /** Logs the outcome (attendance + rating) of a mentor match. */
