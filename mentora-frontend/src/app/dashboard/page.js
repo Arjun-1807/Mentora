@@ -7,6 +7,8 @@ import AuthGuard from "@/components/AuthGuard";
 import { PageShell, PageHeader } from "@/components/PageShell";
 import { StateCard, InlineError } from "@/components/StateCard";
 import { StarRating } from "@/components/StarRating";
+import { RetrievalMetrics } from "@/components/RetrievalMetrics";
+import { CountUp, HoverCard } from "@/components/motion";
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -40,6 +42,7 @@ import {
 const STATUS_VARIANT = {
   pending: "secondary",
   emailed: "outline",
+  email_sent: "outline",
   completed: "default",
   // Legacy statuses, still rendered sensibly if older records show up.
   sent: "outline",
@@ -49,18 +52,27 @@ const STATUS_VARIANT = {
 
 const STATUS_LABEL = {
   pending: "Pending",
-  emailed: "Emailed",
+  emailed: "Drafted",
+  email_sent: "Intro sent",
   completed: "Completed",
-  sent: "Emailed",
+  sent: "Intro sent",
   accepted: "Accepted",
   declined: "Declined",
 };
 
-/** Statuses that mean an intro email was drafted/handed off for this match. */
-const EMAILED_STATUSES = new Set(["emailed", "sent", "accepted", "declined", "completed"]);
+/** Statuses that mean an intro email was actually delivered for this match. */
+const SENT_STATUSES = new Set(["email_sent", "sent", "accepted", "declined"]);
 
 function statusOf(match) {
   return String(match?.status || "pending").toLowerCase();
+}
+
+/**
+ * A "completed" match may or may not have had an intro sent through Mentora,
+ * so `email_sent_at` (stamped by POST /feedback-status) is the reliable signal.
+ */
+function introSent(match) {
+  return Boolean(match?.email_sent_at) || SENT_STATUSES.has(statusOf(match));
 }
 
 /**
@@ -94,25 +106,29 @@ function timestampLabel(value) {
   });
 }
 
-function StatCard({ label, value, hint, loading }) {
+function StatCard({ label, value, decimals = 0, hint, loading }) {
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-xs uppercase tracking-wide text-muted-foreground">
-          {label}
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        {loading ? (
-          <Skeleton className="h-8 w-16" />
-        ) : (
-          <>
-            <p className="text-3xl font-bold text-foreground tabular-nums">{value}</p>
-            {hint && <p className="mt-1 text-xs text-muted-foreground">{hint}</p>}
-          </>
-        )}
-      </CardContent>
-    </Card>
+    <HoverCard>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-xs uppercase tracking-wide text-muted-foreground">
+            {label}
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <Skeleton className="h-8 w-16" />
+          ) : (
+            <>
+              <p className="text-3xl font-bold text-foreground tabular-nums">
+                <CountUp value={value} decimals={decimals} />
+              </p>
+              {hint && <p className="mt-1 text-xs text-muted-foreground">{hint}</p>}
+            </>
+          )}
+        </CardContent>
+      </Card>
+    </HoverCard>
   );
 }
 
@@ -296,7 +312,7 @@ function DashboardPageContent() {
 
   const stats = useMemo(() => {
     const total = matches.length;
-    const emailsSent = matches.filter((m) => EMAILED_STATUSES.has(statusOf(m))).length;
+    const introsSent = matches.filter(introSent).length;
     const completed = matches.filter((m) => statusOf(m) === "completed").length;
 
     const known = matches.map(feedbackOf);
@@ -320,31 +336,32 @@ function DashboardPageContent() {
 
     const usedRatings = ratings.length ? ratings : fallbackRatings;
     const avg = usedRatings.length
-      ? (usedRatings.reduce((a, b) => a + b, 0) / usedRatings.length).toFixed(1)
+      ? Math.round((usedRatings.reduce((a, b) => a + b, 0) / usedRatings.length) * 10) / 10
       : null;
 
     const attendanceKnown = attendedKnown.length > 0 || completed === 0;
 
     return [
       {
-        label: "Total matches",
+        label: "Total Matches",
         value: total,
         hint: total === 0 ? "Run a match to get started" : undefined,
       },
       {
-        label: "Emails drafted",
-        value: emailsSent,
-        hint: "Intro drafts handed off to you",
+        label: "Intros Sent",
+        value: introsSent,
+        hint: "Delivered through Mentora",
       },
       {
-        label: "Meetings attended",
+        label: "Meetings Held",
         value: attendanceKnown ? attendedCount : "—",
         hint: attendanceKnown ? undefined : "Not reported on these records",
       },
       {
-        label: "Avg satisfaction",
+        label: "Avg Rating",
         value: avg ?? "—",
-        hint: avg ? "Out of 5" : "No feedback logged yet",
+        decimals: 1,
+        hint: avg !== null ? "Out of 5" : "No feedback logged yet",
       },
     ];
   }, [matches, mentorRatings]);
@@ -355,8 +372,8 @@ function DashboardPageContent() {
     <>
       <PageShell width="full">
         <PageHeader
-          title="Dashboard"
-          description="Every mentor match you've made, and how each one turned out."
+          title="Incubator Overview"
+          description="Every mentor match, every intro sent, and how each one turned out."
           actions={
             <>
               <Button
@@ -382,107 +399,111 @@ function DashboardPageContent() {
           ))}
         </div>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Match history</CardTitle>
-            <CardDescription>
-              Status moves from pending → emailed → completed as you draft the
-              intro and log the outcome.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {loading ? (
-              <div className="space-y-2">
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <Skeleton key={i} className="h-10 w-full" />
-                ))}
-              </div>
-            ) : error ? (
-              <InlineError message={error}>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setReloadKey((k) => k + 1)}
-                >
-                  Try again
-                </Button>
-              </InlineError>
-            ) : showEmptyState ? (
-              <StateCard
-                icon={LayoutDashboard}
-                title="No matches recorded yet"
-                description="Upload a pitch deck and run the matching — every match shows up here so you can track the outcome."
-                actions={<Button render={<Link href="/upload" />}>Upload a pitch deck</Button>}
-                className="border-0 shadow-none bg-transparent"
-              />
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Mentor</TableHead>
-                    <TableHead>Score</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Rating</TableHead>
-                    <TableHead>Matched</TableHead>
-                    <TableHead className="text-right">Action</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {matches.map((match, i) => {
-                    const status = statusOf(match);
-                    const { rating } = feedbackOf(match);
-                    const name =
-                      match.mentor_name || mentorNames[match.mentor_id] || null;
-                    const done = status === "completed";
+        <HoverCard>
+          <Card>
+            <CardHeader>
+              <CardTitle>Match history</CardTitle>
+              <CardDescription>
+                Status moves from pending → drafted → intro sent → completed as
+                you reach out and log the outcome.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {loading ? (
+                <div className="space-y-2">
+                  {Array.from({ length: 4 }).map((_, i) => (
+                    <Skeleton key={i} className="h-10 w-full" />
+                  ))}
+                </div>
+              ) : error ? (
+                <InlineError message={error}>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setReloadKey((k) => k + 1)}
+                  >
+                    Try again
+                  </Button>
+                </InlineError>
+              ) : showEmptyState ? (
+                <StateCard
+                  icon={LayoutDashboard}
+                  title="No matches recorded yet"
+                  description="Upload a pitch deck and run the matching — every match shows up here so you can track the outcome."
+                  actions={<Button render={<Link href="/upload" />}>Upload a pitch deck</Button>}
+                  className="border-0 shadow-none bg-transparent"
+                />
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Mentor</TableHead>
+                      <TableHead>Score</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Rating</TableHead>
+                      <TableHead>Matched</TableHead>
+                      <TableHead className="text-right">Action</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {matches.map((match, i) => {
+                      const status = statusOf(match);
+                      const { rating } = feedbackOf(match);
+                      const name =
+                        match.mentor_name || mentorNames[match.mentor_id] || null;
+                      const done = status === "completed";
 
-                    return (
-                      <TableRow key={match.match_id || `${match.mentor_id}-${i}`}>
-                        <TableCell className="max-w-[16rem]">
-                          {name ? (
-                            <span className="truncate block">{name}</span>
-                          ) : (
-                            <span className="font-mono text-xs text-muted-foreground truncate block">
-                              {match.mentor_id || "unknown"}
-                            </span>
-                          )}
-                        </TableCell>
-                        <TableCell className="tabular-nums">
-                          {scoreLabel(match.score ?? match.match_score)}
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant={STATUS_VARIANT[status] || "secondary"}>
-                            {STATUS_LABEL[status] || status}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="tabular-nums">
-                          {typeof rating === "number" ? `${rating}/5` : "—"}
-                        </TableCell>
-                        <TableCell className="text-muted-foreground">
-                          {timestampLabel(match.timestamp || match.updated_at)}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          {done ? (
-                            <span className="text-xs text-muted-foreground">Logged</span>
-                          ) : (
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              onClick={() => openLogDialog(match)}
-                            >
-                              Log outcome
-                            </Button>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
+                      return (
+                        <TableRow key={match.match_id || `${match.mentor_id}-${i}`}>
+                          <TableCell className="max-w-[16rem]">
+                            {name ? (
+                              <span className="truncate block">{name}</span>
+                            ) : (
+                              <span className="font-mono text-xs text-muted-foreground truncate block">
+                                {match.mentor_id || "unknown"}
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell className="tabular-nums">
+                            {scoreLabel(match.score ?? match.match_score)}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={STATUS_VARIANT[status] || "secondary"}>
+                              {STATUS_LABEL[status] || status}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="tabular-nums">
+                            {typeof rating === "number" ? `${rating}/5` : "—"}
+                          </TableCell>
+                          <TableCell className="text-muted-foreground">
+                            {timestampLabel(match.timestamp || match.updated_at)}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            {done ? (
+                              <span className="text-xs text-muted-foreground">Logged</span>
+                            ) : (
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() => openLogDialog(match)}
+                              >
+                                Log outcome
+                              </Button>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+        </HoverCard>
+
+        <RetrievalMetrics />
       </PageShell>
 
       <LogOutcomeDialog
