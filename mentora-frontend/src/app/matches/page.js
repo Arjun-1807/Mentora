@@ -2,10 +2,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import AuthGuard from "@/components/AuthGuard";
 import { PageShell, PageHeader } from "@/components/PageShell";
 import { StateCard, InlineError } from "@/components/StateCard";
+import { FadeIn, HoverCard, useCountUp } from "@/components/motion";
 import { Card, CardHeader, CardContent, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -23,9 +25,12 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { Mail, Copy, ExternalLink, Loader2, UserSearch } from "lucide-react";
-import { draftIntroEmail, matchMentors } from "@/lib/api";
+import { Mail, Copy, Send, Loader2, UserSearch, CheckCircle2 } from "lucide-react";
+import { draftIntroEmail, matchMentors, sendEmail, updateMatchStatus } from "@/lib/api";
 import { getStoredMatches, getStoredProfile, setStoredMatches } from "@/lib/storage";
+
+/** Statuses at or beyond "an intro email was actually delivered". */
+const SENT_STATUSES = new Set(["email_sent", "completed"]);
 
 function initialsFor(name) {
   if (!name) return "?";
@@ -39,8 +44,34 @@ function scorePercent(score) {
   return Math.round(Math.max(0, Math.min(100, score <= 1 ? score * 100 : score)));
 }
 
-function EmailDialog({ open, onOpenChange, mentor, startupProfile, onDrafted }) {
+function stageLabel(stage) {
+  if (!stage) return null;
+  return String(stage).toLowerCase() === "all" ? "All stages" : `${stage} stage`;
+}
+
+/** Score bar + number that count up from 0 when the card mounts. */
+function MatchScore({ score, mentorName }) {
+  const percent = scorePercent(score);
+  const current = useCountUp(percent ?? 0, { duration: 1100 });
+
+  return (
+    <>
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="text-xs uppercase tracking-wide text-muted-foreground">
+          Match Score
+        </span>
+        <span className="text-sm font-semibold text-primary tabular-nums">
+          {percent === null ? "—" : `${current}%`}
+        </span>
+      </div>
+      <Progress value={current} aria-label={`Match score for ${mentorName}`} />
+    </>
+  );
+}
+
+function EmailDialog({ open, onOpenChange, mentor, startupProfile, onSent }) {
   const [loading, setLoading] = useState(false);
+  const [sending, setSending] = useState(false);
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [error, setError] = useState("");
@@ -62,7 +93,6 @@ function EmailDialog({ open, onOpenChange, mentor, startupProfile, onDrafted }) 
         if (cancelled) return;
         setSubject(data?.subject || `Introduction request — ${mentor.name || "Mentora"}`);
         setBody(data?.body || "");
-        onDrafted?.(mentor);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -80,6 +110,7 @@ function EmailDialog({ open, onOpenChange, mentor, startupProfile, onDrafted }) 
   }, [open, mentor, startupProfile, reloadKey]);
 
   const ready = !loading && !error;
+  const canSend = ready && !sending && Boolean(mentor?.email) && subject.trim() && body.trim();
 
   async function handleCopy() {
     try {
@@ -90,20 +121,42 @@ function EmailDialog({ open, onOpenChange, mentor, startupProfile, onDrafted }) 
     }
   }
 
-  function handleOpenInMailClient() {
-    const to = mentor?.email || "";
-    const params = new URLSearchParams({ subject, body });
-    window.location.href = `mailto:${to}?${params.toString()}`;
+  async function handleSend() {
+    if (!canSend) return;
+    setSending(true);
+    try {
+      await sendEmail({ to: mentor.email, subject: subject.trim(), body: body.trim() });
+    } catch (err) {
+      // Network failures already raised the "Server unavailable" toast.
+      if (err.status !== 0) toast.error("Failed to send email. Check your API key.");
+      setSending(false);
+      return;
+    }
+
+    toast.success(`Email sent to ${mentorName}`);
+    onOpenChange(false);
+    setSending(false);
+
+    // The email is already out; a failed status update shouldn't read as a
+    // failed send, so it gets its own, softer message.
+    if (mentor.match_id) {
+      try {
+        await updateMatchStatus(mentor.match_id, "email_sent");
+      } catch {
+        toast.warning("Email sent, but the match status couldn't be updated.");
+      }
+    }
+    onSent?.(mentor);
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(next) => !sending && onOpenChange(next)}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Intro email draft</DialogTitle>
+          <DialogTitle>Reach out to {mentorName}</DialogTitle>
           <DialogDescription>
-            Drafted for {mentorName}. Mentora never sends mail on your behalf —
-            edit this, then copy it or open it in your own mail client.
+            We drafted a personalised intro from your profile. Edit anything you
+            like before sending.
           </DialogDescription>
         </DialogHeader>
 
@@ -126,12 +179,18 @@ function EmailDialog({ open, onOpenChange, mentor, startupProfile, onDrafted }) 
           </InlineError>
         ) : (
           <div className="space-y-3">
+            {mentor?.email && (
+              <p className="text-xs text-muted-foreground">
+                To: <span className="text-foreground">{mentor.email}</span>
+              </p>
+            )}
             <div className="space-y-1.5">
               <Label htmlFor="email-subject">Subject</Label>
               <Input
                 id="email-subject"
                 value={subject}
                 onChange={(e) => setSubject(e.target.value)}
+                disabled={sending}
               />
             </div>
             <div className="space-y-1.5">
@@ -141,25 +200,31 @@ function EmailDialog({ open, onOpenChange, mentor, startupProfile, onDrafted }) 
                 rows={10}
                 value={body}
                 onChange={(e) => setBody(e.target.value)}
+                disabled={sending}
               />
             </div>
             {!mentor?.email && (
               <p className="text-xs text-muted-foreground">
-                We don&apos;t have an address for {mentorName}, so your mail
-                client will open with an empty “To” field.
+                We don&apos;t have an email address for {mentorName} yet — copy
+                the draft and send it yourself. Refreshing your matches may pick
+                up newly added contact details.
               </p>
             )}
           </div>
         )}
 
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={handleCopy} disabled={!ready}>
+          <Button type="button" variant="outline" onClick={handleCopy} disabled={!ready || sending}>
             <Copy className="h-4 w-4" aria-hidden="true" />
             Copy draft
           </Button>
-          <Button type="button" onClick={handleOpenInMailClient} disabled={!ready}>
-            <ExternalLink className="h-4 w-4" aria-hidden="true" />
-            Open in mail client
+          <Button type="button" onClick={handleSend} disabled={!canSend}>
+            {sending ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <Send className="h-4 w-4" aria-hidden="true" />
+            )}
+            {sending ? "Sending…" : "Send"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -168,20 +233,25 @@ function EmailDialog({ open, onOpenChange, mentor, startupProfile, onDrafted }) 
 }
 
 function MatchesPageContent() {
+  const router = useRouter();
   const [matches, setMatches] = useState(null);
-  const [hydrated, setHydrated] = useState(false);
   const [startupProfile, setStartupProfile] = useState(null);
   const [activeMentor, setActiveMentor] = useState(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [rematching, setRematching] = useState(false);
   const [error, setError] = useState("");
-  const [emailedIds, setEmailedIds] = useState(() => new Set());
 
   useEffect(() => {
-    setMatches(getStoredMatches());
+    // `null` = matching never ran for this profile (vs. `[]` = ran, no hits).
+    const stored = getStoredMatches();
+    if (stored === null) {
+      toast.info("Please complete your profile first.", { id: "matches-missing" });
+      router.replace("/profile");
+      return;
+    }
+    setMatches(stored);
     setStartupProfile(getStoredProfile());
-    setHydrated(true);
-  }, []);
+  }, [router]);
 
   const runMatch = useCallback(
     async (profile) => {
@@ -193,9 +263,6 @@ function MatchesPageContent() {
         const list = Array.isArray(data) ? data : data?.matches || [];
         setStoredMatches(list);
         setMatches(list);
-        if (list.length === 0) {
-          toast.info("No mentors matched this profile yet.");
-        }
       } catch (err) {
         setError(err.message || "Could not refresh your mentor matches.");
       } finally {
@@ -210,20 +277,24 @@ function MatchesPageContent() {
     setDialogOpen(true);
   }
 
-  const markEmailed = useCallback((mentor) => {
-    const key = mentor?.match_id || mentor?.mentor_id;
-    if (!key) return;
-    setEmailedIds((prev) => {
-      if (prev.has(key)) return prev;
-      const next = new Set(prev);
-      next.add(key);
+  const markSent = useCallback((mentor) => {
+    setMatches((prev) => {
+      if (!prev) return prev;
+      const next = prev.map((m) =>
+        (m.match_id && m.match_id === mentor.match_id) ||
+        (!m.match_id && m.mentor_id === mentor.mentor_id)
+          ? { ...m, status: "email_sent" }
+          : m
+      );
+      // Persist so the "Intro sent" badge survives a reload.
+      setStoredMatches(next);
       return next;
     });
   }, []);
 
-  if (!hydrated) {
+  if (matches === null) {
     return (
-      <PageShell>
+      <PageShell key="loading">
         <div className="space-y-6">
           {Array.from({ length: 3 }).map((_, i) => (
             <Skeleton key={i} className="h-44 w-full" />
@@ -233,10 +304,10 @@ function MatchesPageContent() {
     );
   }
 
-  if (!matches || matches.length === 0) {
+  if (matches.length === 0) {
     return (
-      <PageShell width="lg" center>
-        <div className="space-y-4">
+      <PageShell key="empty" width="lg" center>
+        <FadeIn className="space-y-4">
           {error && (
             <InlineError message={error}>
               <Button
@@ -250,38 +321,30 @@ function MatchesPageContent() {
               </Button>
             </InlineError>
           )}
-          {startupProfile ? (
-            <StateCard
-              icon={UserSearch}
-              title="No mentor matches yet"
-              description="Your startup profile is ready — run the matching to see the mentors best suited to help you."
-              actions={
-                <>
+          <StateCard
+            icon={UserSearch}
+            title="No matches found"
+            description="Try re-uploading a more detailed deck."
+            actions={
+              <>
+                <Button render={<Link href="/upload" />}>Re-upload deck</Button>
+                {startupProfile && (
                   <Button
                     type="button"
+                    variant="outline"
                     onClick={() => runMatch(startupProfile)}
                     disabled={rematching}
                   >
                     {rematching && (
                       <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
                     )}
-                    {rematching ? "Finding mentors…" : "Find my mentors"}
+                    {rematching ? "Searching…" : "Search again"}
                   </Button>
-                  <Button variant="outline" render={<Link href="/profile" />}>
-                    Review profile
-                  </Button>
-                </>
-              }
-            />
-          ) : (
-            <StateCard
-              icon={UserSearch}
-              title="No mentor matches yet"
-              description="Upload a pitch deck first — matching runs on the startup profile we extract from it."
-              actions={<Button render={<Link href="/upload" />}>Upload a pitch deck</Button>}
-            />
-          )}
-        </div>
+                )}
+              </>
+            }
+          />
+        </FadeIn>
       </PageShell>
     );
   }
@@ -293,8 +356,8 @@ function MatchesPageContent() {
       <PageShell>
         <PageHeader
           align="center"
-          title="Your top mentor matches"
-          description="Ranked by fit with your startup profile. Draft an intro email to any of them — you stay in control of what actually gets sent."
+          title="Your Top Mentor Matches"
+          description="Ranked by domain fit, stage alignment, and mentor track record."
         />
 
         {error && (
@@ -313,80 +376,76 @@ function MatchesPageContent() {
 
         <div className="grid gap-5">
           {topMatches.map((mentor, i) => {
-            const percent = scorePercent(mentor.match_score);
             const key = mentor.match_id || mentor.mentor_id || i;
-            const emailed = emailedIds.has(mentor.match_id || mentor.mentor_id);
+            const sent = SENT_STATUSES.has(String(mentor.status || "").toLowerCase());
+            const name = mentor.name || "Unnamed mentor";
 
             return (
-              <Card key={key}>
-                <CardHeader>
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <Avatar size="lg">
-                        <AvatarFallback>{initialsFor(mentor.name)}</AvatarFallback>
-                      </Avatar>
-                      <div className="min-w-0">
-                        <CardTitle className="text-lg truncate">
-                          {mentor.name || "Unnamed mentor"}
-                        </CardTitle>
-                        <div className="mt-1 flex flex-wrap items-center gap-2">
-                          <Badge variant="secondary">{mentor.domain || "General"}</Badge>
-                          {mentor.stage_focus && (
-                            <span className="text-xs text-muted-foreground">
-                              {mentor.stage_focus} stage
-                            </span>
-                          )}
-                          {emailed && (
-                            <Badge variant="outline">Draft opened</Badge>
-                          )}
+              <HoverCard key={key}>
+                <Card>
+                  <CardHeader>
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <Avatar size="lg">
+                          <AvatarFallback>{initialsFor(mentor.name)}</AvatarFallback>
+                        </Avatar>
+                        <div className="min-w-0">
+                          <CardTitle className="text-lg truncate">{name}</CardTitle>
+                          <div className="mt-1 flex flex-wrap items-center gap-2">
+                            <Badge variant="secondary">{mentor.domain || "General"}</Badge>
+                            {stageLabel(mentor.stage_focus) && (
+                              <span className="text-xs text-muted-foreground">
+                                {stageLabel(mentor.stage_focus)}
+                              </span>
+                            )}
+                            {sent && (
+                              <Badge variant="outline">
+                                <CheckCircle2 aria-hidden="true" />
+                                Intro sent
+                              </Badge>
+                            )}
+                          </div>
                         </div>
                       </div>
+                      <span
+                        className="inline-flex items-center justify-center bg-muted h-8 w-8 shrink-0 text-sm font-semibold text-muted-foreground"
+                        aria-label={`Rank ${i + 1}`}
+                      >
+                        {i + 1}
+                      </span>
                     </div>
-                    <span
-                      className="inline-flex items-center justify-center bg-muted h-8 w-8 shrink-0 text-sm font-semibold text-muted-foreground"
-                      aria-label={`Rank ${i + 1}`}
-                    >
-                      {i + 1}
-                    </span>
-                  </div>
-                </CardHeader>
-                <CardContent>
-                  {Array.isArray(mentor.expertise) && mentor.expertise.length > 0 && (
-                    <div className="flex flex-wrap gap-2 mb-5">
-                      {mentor.expertise.map((skill, idx) => (
-                        <Badge key={idx} variant="outline">
-                          {skill}
-                        </Badge>
-                      ))}
+                  </CardHeader>
+                  <CardContent>
+                    {Array.isArray(mentor.expertise) && mentor.expertise.length > 0 && (
+                      <div className="flex flex-wrap gap-2 mb-5">
+                        {mentor.expertise.map((skill, idx) => (
+                          <Badge key={idx} variant="outline">
+                            {skill}
+                          </Badge>
+                        ))}
+                      </div>
+                    )}
+
+                    <MatchScore score={mentor.match_score} mentorName={name} />
+
+                    <div className="mt-5 flex justify-end">
+                      <Button
+                        type="button"
+                        variant={sent ? "outline" : "default"}
+                        onClick={() => openEmailDialog(mentor)}
+                      >
+                        <Mail className="h-4 w-4" aria-hidden="true" />
+                        {sent ? "Send another intro" : "Reach out"}
+                      </Button>
                     </div>
-                  )}
-
-                  <div className="mb-1.5 flex items-center justify-between">
-                    <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                      Match score
-                    </span>
-                    <span className="text-sm font-semibold text-primary">
-                      {percent === null ? "—" : `${percent}%`}
-                    </span>
-                  </div>
-                  <Progress
-                    value={percent ?? 0}
-                    aria-label={`Match score for ${mentor.name || "this mentor"}`}
-                  />
-
-                  <div className="mt-5 flex justify-end">
-                    <Button type="button" onClick={() => openEmailDialog(mentor)}>
-                      <Mail className="h-4 w-4" aria-hidden="true" />
-                      Draft intro email
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
+                  </CardContent>
+                </Card>
+              </HoverCard>
             );
           })}
         </div>
 
-        <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+        <FadeIn className="mt-8 flex flex-wrap items-center justify-center gap-3">
           <Button
             type="button"
             variant="outline"
@@ -399,7 +458,7 @@ function MatchesPageContent() {
           <Button variant="ghost" render={<Link href="/dashboard" />}>
             View dashboard
           </Button>
-        </div>
+        </FadeIn>
       </PageShell>
 
       <EmailDialog
@@ -407,7 +466,7 @@ function MatchesPageContent() {
         onOpenChange={setDialogOpen}
         mentor={activeMentor}
         startupProfile={startupProfile}
-        onDrafted={markEmailed}
+        onSent={markSent}
       />
     </>
   );
