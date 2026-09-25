@@ -3,6 +3,8 @@ POST /feedback         - records post-match feedback (attendance + rating),
                          recomputes the mentor's rolling-average
                          effectiveness score, and completes the match.
 GET  /feedback/summary - per-mentor aggregate feedback stats for dashboards.
+POST /feedback-status  - advances a match's lifecycle status (e.g. to
+                         "email_sent" once the intro email was delivered).
 
 Authorization: feedback may only be submitted by the user who owns the
 match record, exactly once per match (a second submission returns 409).
@@ -20,6 +22,8 @@ from app.db.mongo import get_feedback_collection, get_matches_collection, get_me
 from app.models.schemas import (
     FeedbackRequest,
     FeedbackResponse,
+    FeedbackStatusRequest,
+    FeedbackStatusResponse,
     FeedbackSummaryResponse,
     MentorFeedbackStats,
 )
@@ -155,6 +159,45 @@ async def submit_feedback(request: FeedbackRequest, user=Depends(get_current_use
     advance_match_status(request.match_id, user_id, "completed")
 
     return FeedbackResponse(success=True, new_effectiveness_score=new_effectiveness_score)
+
+
+@router.post("/feedback-status", response_model=FeedbackStatusResponse)
+async def update_match_status(
+    request: FeedbackStatusRequest, user=Depends(get_current_user)
+) -> FeedbackStatusResponse:
+    """Advance one of the caller's matches to `emailed` or `email_sent`.
+
+    Forward-only and idempotent: asking for a status the match has already
+    reached (or passed) is a 200 that leaves it unchanged. `completed` can
+    only be reached by submitting feedback via POST /feedback.
+
+    Errors: 404 if the match does not exist, 403 if it belongs to another
+    user, 422 for any other status value.
+    """
+    user_id = str(user.get("sub", ""))
+    matches = get_matches_collection()
+
+    try:
+        match_doc = matches.find_one({"match_id": request.match_id}, {"user_id": 1, "status": 1})
+    except Exception:
+        logger.exception("Failed to look up match %s", request.match_id)
+        raise HTTPException(status_code=502, detail="Could not update the match. Please try again shortly.")
+
+    if not match_doc:
+        raise HTTPException(status_code=404, detail="Match not found.")
+    if str(match_doc.get("user_id") or "") != user_id:
+        raise HTTPException(status_code=403, detail="You do not have access to this match.")
+
+    advance_match_status(request.match_id, user_id, request.status)
+
+    try:
+        refreshed = matches.find_one({"match_id": request.match_id}, {"status": 1})
+    except Exception:
+        logger.exception("Failed to re-read match %s after status update", request.match_id)
+        refreshed = None
+    status = (refreshed or match_doc).get("status") or request.status
+
+    return FeedbackStatusResponse(success=True, match_id=request.match_id, status=status)
 
 
 @router.get("/feedback/summary", response_model=FeedbackSummaryResponse)

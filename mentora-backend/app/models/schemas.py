@@ -5,7 +5,7 @@ internal mentor representation.
 """
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, StrictBool, field_validator
 
 StartupStage = Literal["idea", "MVP", "growth"]
 # A mentor may focus on one stage or on all of them.
@@ -13,10 +13,15 @@ MentorStage = Literal["idea", "MVP", "growth", "all"]
 UserRole = Literal["startup", "mentor"]
 
 # Match lifecycle vocabulary (see README "Match status lifecycle"):
-#   pending   -> created by POST /match, no outreach yet
-#   emailed   -> an intro email was drafted for it via POST /email
-#   completed -> feedback was submitted for it via POST /feedback
-MatchStatus = Literal["pending", "emailed", "completed"]
+#   pending    -> created by POST /match, no outreach yet
+#   emailed    -> an intro email was drafted for it via POST /email
+#   email_sent -> the intro email was actually delivered (POST /feedback-status)
+#   completed  -> feedback was submitted for it via POST /feedback
+MatchStatus = Literal["pending", "emailed", "email_sent", "completed"]
+
+# Statuses a client may set directly via POST /feedback-status.
+# "completed" is deliberately excluded: it is only reachable via /feedback.
+ClientSettableMatchStatus = Literal["emailed", "email_sent"]
 
 # Minimum password length enforced at registration.
 MIN_PASSWORD_LENGTH = 8
@@ -200,8 +205,21 @@ class FeedbackRequest(BaseModel):
 
     match_id: str
     mentor_id: str
-    attended: bool
-    rating: int = Field(..., ge=1, le=5)
+    attended: StrictBool
+    rating: int = Field(..., ge=1, le=5, strict=True)
+
+
+class FeedbackStatusRequest(BaseModel):
+    """Request body for POST /feedback-status."""
+
+    match_id: str = Field(..., min_length=1)
+    status: ClientSettableMatchStatus
+
+
+class FeedbackStatusResponse(BaseModel):
+    success: bool
+    match_id: str
+    status: str
 
 
 class FeedbackResponse(BaseModel):

@@ -12,8 +12,10 @@ Two concerns live here:
    records (and preserves their `match_id` and `status`) instead of
    creating new ones.
 
-2. **Status lifecycle.** `pending` -> `emailed` -> `completed`, advanced
-   only forwards (see `advance_match_status`).
+2. **Status lifecycle.** `pending` -> `emailed` -> `email_sent` ->
+   `completed`, advanced only forwards (see `advance_match_status`).
+   `emailed` means a draft was generated; `email_sent` means it was
+   actually delivered (the match then also carries `email_sent_at`).
 """
 import hashlib
 import json
@@ -30,7 +32,7 @@ from app.models.schemas import MentorMatch, StartupProfile
 logger = logging.getLogger(__name__)
 
 # Ordered status vocabulary; index == lifecycle position.
-MATCH_STATUS_ORDER: List[str] = ["pending", "emailed", "completed"]
+MATCH_STATUS_ORDER: List[str] = ["pending", "emailed", "email_sent", "completed"]
 
 
 def profile_fingerprint(profile: StartupProfile) -> str:
@@ -112,10 +114,14 @@ def advance_match_status(match_id: Optional[str], user_id: str, new_status: str)
         raise ValueError(f"Unknown match status: {new_status!r}")
 
     earlier = MATCH_STATUS_ORDER[: MATCH_STATUS_ORDER.index(new_status)]
+    now = datetime.now(timezone.utc).isoformat()
+    update = {"status": new_status, "status_updated_at": now}
+    if new_status == "email_sent":
+        update["email_sent_at"] = now
     try:
         result = get_matches_collection().update_one(
             {"match_id": match_id, "user_id": user_id, "status": {"$in": earlier}},
-            {"$set": {"status": new_status, "status_updated_at": datetime.now(timezone.utc).isoformat()}},
+            {"$set": update},
         )
     except Exception:
         logger.exception("Failed to advance match %s to status %r", match_id, new_status)
