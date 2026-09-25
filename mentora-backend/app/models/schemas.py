@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 StartupStage = Literal["idea", "MVP", "growth"]
+# A mentor may focus on one stage or on all of them.
+MentorStage = Literal["idea", "MVP", "growth", "all"]
 UserRole = Literal["startup", "mentor"]
 
 # Match lifecycle vocabulary (see README "Match status lifecycle"):
@@ -63,10 +65,12 @@ class MentorDocument(BaseModel):
 
     name: str
     domain: str
-    stage_focus: StartupStage
+    stage_focus: MentorStage
     expertise: List[str]
     embedding: Optional[List[float]] = None
     geography: Optional[str] = None
+    email: Optional[str] = None
+    preferred_stages: List[MentorStage] = Field(default_factory=list)
     effectiveness_score: Optional[float] = Field(
         default=None, description="Rolling average (1-5) of feedback ratings for this mentor"
     )
@@ -94,26 +98,77 @@ class MentorListResponse(BaseModel):
     total: int
 
 
+def _clean_str_list(value: Any) -> List[str]:
+    """Normalise a list-or-comma-separated-string into stripped, non-empty,
+    de-duplicated entries (first occurrence wins)."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = value.split(",")
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("must be a list of strings")
+    cleaned: List[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError("must be a list of strings")
+        item = item.strip()
+        if item and item not in cleaned:
+            cleaned.append(item)
+    return cleaned
+
+
 class MentorProfileIn(BaseModel):
     """Validated mentor registration profile (the `profile` object of
-    POST /register when `role == "mentor"`)."""
+    POST /register when `role == "mentor"`).
+
+    Registration only needs a name and at least one sector; the rest of
+    the profile is collected by the onboarding flow (PATCH /mentor/profile).
+    `domain` and `expertise` default to the chosen sectors so the mentor is
+    matchable immediately.
+    """
 
     name: str = Field(..., min_length=1, description="Mentor's display name")
-    domain: str = Field(..., min_length=1, description="Mentor's domain, e.g. 'Fintech'")
-    stage_focus: StartupStage = Field(..., description="Stage the mentor focuses on: idea, MVP, or growth")
-    expertise: List[str] = Field(..., min_length=1, description="At least one expertise area")
-    sector_expertise: Optional[str] = None
+    sector_expertise: List[str] = Field(..., description="At least one sector, e.g. ['FinTech']")
+    domain: Optional[str] = Field(default=None, description="Defaults to the first sector")
+    stage_focus: MentorStage = Field(default="all", description="idea, MVP, growth, or all")
+    expertise: List[str] = Field(default_factory=list, description="Defaults to sector_expertise")
+    preferred_stages: List[MentorStage] = Field(default_factory=list)
     past_exits: Optional[Any] = None
     geography: Optional[str] = None
     availability: Optional[Any] = None
+    linkedin_url: Optional[str] = None
+    bio: Optional[str] = None
+    years_experience: Optional[str] = None
+    max_startups_per_month: Optional[str] = None
 
-    @field_validator("expertise")
+    @field_validator("name")
     @classmethod
-    def _non_empty_expertise(cls, value: List[str]) -> List[str]:
-        cleaned = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    def _non_blank_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("name must not be blank")
+        return value
+
+    @field_validator("sector_expertise", mode="before")
+    @classmethod
+    def _non_empty_sectors(cls, value: Any) -> List[str]:
+        cleaned = _clean_str_list(value)
         if not cleaned:
-            raise ValueError("expertise must contain at least one non-empty entry")
+            raise ValueError("sector_expertise must contain at least one sector")
         return cleaned
+
+    @field_validator("expertise", mode="before")
+    @classmethod
+    def _clean_expertise(cls, value: Any) -> List[str]:
+        return _clean_str_list(value)
+
+    def model_post_init(self, __context: Any) -> None:
+        if not (self.domain or "").strip():
+            self.domain = self.sector_expertise[0]
+        if not self.expertise:
+            self.expertise = list(self.sector_expertise)
+        if not self.preferred_stages:
+            self.preferred_stages = [self.stage_focus]
 
 
 class EmailRequest(BaseModel):

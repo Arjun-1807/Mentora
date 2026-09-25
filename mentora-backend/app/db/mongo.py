@@ -64,7 +64,7 @@ def ensure_indexes() -> None:
     """Create the indexes the app relies on. Safe to call repeatedly.
 
     - users.email           unique -> closes the register check-then-insert
-                                      race (DuplicateKeyError -> 400).
+                                      race (DuplicateKeyError -> 409).
     - matches.match_id      unique -> match ids are the handle used by
                                       /email and /feedback.
     - matches.user_id              -> per-user match listing (/matches/all).

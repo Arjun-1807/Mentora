@@ -80,6 +80,7 @@ MENTOR_PAYLOAD = {
     "role": "mentor",
     "profile": {
         "name": "Ada Mentor",
+        "sector_expertise": ["FinTech"],
         "domain": "Fintech",
         "stage_focus": "MVP",
         "expertise": ["Fundraising"],

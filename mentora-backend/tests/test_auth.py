@@ -18,13 +18,13 @@ def test_register_returns_token(client):
 def test_register_duplicate_email_rejected(client):
     register(client, STARTUP_PAYLOAD)
     response = client.post("/register", json=STARTUP_PAYLOAD)
-    assert response.status_code == 400
-    assert "already exists" in response.json()["detail"]
+    assert response.status_code == 409
+    assert response.json()["error"] == "Account already exists."
 
 
 def test_register_duplicate_email_rejected_by_unique_index(client, monkeypatch):
     """Even if the pre-check is bypassed (the check-then-insert race), the
-    unique index on users.email turns the duplicate into a clean 400."""
+    unique index on users.email turns the duplicate into a clean 409."""
     register(client, STARTUP_PAYLOAD)
 
     from app.routers import auth as auth_router
@@ -35,7 +35,8 @@ def test_register_duplicate_email_rejected_by_unique_index(client, monkeypatch):
     )
 
     response = client.post("/register", json=STARTUP_PAYLOAD)
-    assert response.status_code == 400
+    assert response.status_code == 409
+    assert response.json()["error"] == "Account already exists."
 
 
 class _NoPrecheck:
@@ -139,26 +140,52 @@ def test_mentor_registration_creates_linked_mentor_document(client, fake_mongo):
     )
     assert mentor_doc is not None
     assert mentor_doc["domain"] == "Fintech"
+    assert mentor_doc["email"] == MENTOR_PAYLOAD["email"]
+    assert mentor_doc["sector_expertise"] == ["FinTech"]
+    assert mentor_doc["onboarding_completed"] is False
     assert len(mentor_doc["embedding"]) == 768
     # Cross-linked back to the user account.
     assert mentor_doc["user_id"] == me["user_id"]
 
 
+def test_minimal_mentor_registration_derives_matching_fields(client, fake_mongo):
+    """Name + sectors is enough; domain/expertise/stage default sensibly."""
+    payload = {
+        **MENTOR_PAYLOAD,
+        "profile": {"name": "Min Mentor", "sector_expertise": "HealthTech, SaaS"},
+    }
+    token = register(client, payload)
+    me = client.get("/me", headers=auth_header(token)).json()
+
+    from bson import ObjectId
+
+    doc = fake_mongo[settings.MONGODB_DB_NAME][settings.MONGODB_MENTORS_COLLECTION].find_one(
+        {"_id": ObjectId(me["mentor_id"])}
+    )
+    assert doc["sector_expertise"] == ["HealthTech", "SaaS"]
+    assert doc["domain"] == "HealthTech"
+    assert doc["expertise"] == ["HealthTech", "SaaS"]
+    assert doc["stage_focus"] == "all"
+    assert doc["preferred_stages"] == ["all"]
+
+
 @pytest.mark.parametrize(
-    "profile",
+    "profile, mentions",
     [
-        {},
-        {"name": "No Domain", "stage_focus": "MVP", "expertise": ["X"]},
-        {"name": "No Stage", "domain": "Fintech", "expertise": ["X"]},
-        {"name": "Bad Stage", "domain": "Fintech", "stage_focus": "seed", "expertise": ["X"]},
-        {"name": "No Expertise", "domain": "Fintech", "stage_focus": "MVP", "expertise": []},
+        ({}, "sector_expertise"),
+        ({"sector_expertise": ["FinTech"]}, "name"),
+        ({"name": "   ", "sector_expertise": ["FinTech"]}, "name"),
+        ({"name": "No Sectors"}, "sector_expertise"),
+        ({"name": "Empty Sectors", "sector_expertise": []}, "sector_expertise"),
+        ({"name": "Blank Sectors", "sector_expertise": ["  ", ""]}, "sector_expertise"),
+        ({"name": "Bad Stage", "sector_expertise": ["FinTech"], "stage_focus": "seed"}, "stage_focus"),
     ],
 )
-def test_mentor_registration_requires_valid_profile(client, profile, fake_mongo):
+def test_mentor_registration_requires_valid_profile(client, profile, mentions, fake_mongo):
     payload = {**MENTOR_PAYLOAD, "profile": profile}
     response = client.post("/register", json=payload)
     assert response.status_code == 422
-    assert "stage_focus" in response.json()["detail"]
+    assert mentions in response.json()["error"]
 
     # Nothing was persisted for the rejected registration.
     db = fake_mongo[settings.MONGODB_DB_NAME]

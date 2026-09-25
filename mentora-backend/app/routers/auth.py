@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["auth"])
 
+DUPLICATE_ACCOUNT_MESSAGE = "Account already exists."
+
 
 def _validate_mentor_profile(profile: dict) -> MentorProfileIn:
     """Validate the mentor registration profile, raising a clear 422.
@@ -53,15 +55,20 @@ def _validate_mentor_profile(profile: dict) -> MentorProfileIn:
         raise HTTPException(
             status_code=422,
             detail=(
-                "Mentor registration requires a valid profile with 'name', 'domain', "
-                "'stage_focus' (one of: idea, MVP, growth) and a non-empty 'expertise' "
-                f"list. Problems: {problems}"
+                "Mentor registration requires a profile with a 'name' and a non-empty "
+                "'sector_expertise' list ('stage_focus', if given, must be one of: idea, "
+                f"MVP, growth, all). Problems: {problems}"
             ),
         ) from exc
 
 
-def _insert_mentor_document(mentor_profile: MentorProfileIn) -> ObjectId:
-    """Insert the mentor document (with embedding) and return its _id."""
+def _insert_mentor_document(mentor_profile: MentorProfileIn, email: str) -> ObjectId:
+    """Insert the mentor document (with embedding) and return its _id.
+
+    `email` is the registering user's address, stored so startups can
+    contact the mentor once matched. The rest of the profile is filled in
+    by the onboarding flow (PATCH /mentor/profile).
+    """
     text = build_mentor_profile_text(
         domain=mentor_profile.domain,
         stage_focus=mentor_profile.stage_focus,
@@ -75,9 +82,16 @@ def _insert_mentor_document(mentor_profile: MentorProfileIn) -> ObjectId:
         "stage_focus": mentor_profile.stage_focus,
         "expertise": mentor_profile.expertise,
         "sector_expertise": mentor_profile.sector_expertise,
+        "preferred_stages": mentor_profile.preferred_stages,
         "past_exits": mentor_profile.past_exits,
         "geography": mentor_profile.geography,
         "availability": mentor_profile.availability,
+        "linkedin_url": mentor_profile.linkedin_url,
+        "bio": mentor_profile.bio,
+        "years_experience": mentor_profile.years_experience,
+        "max_startups_per_month": mentor_profile.max_startups_per_month,
+        "email": email,
+        "onboarding_completed": False,
         "embedding": embedding,
         "effectiveness_score": None,
         "feedback_count": 0,
@@ -114,12 +128,12 @@ async def register(request: RegisterRequest) -> TokenResponse:
     # Cheap pre-check for a friendly error; the unique index on
     # users.email is what actually makes this race-free.
     if users.find_one({"email": request.email}, {"_id": 1}):
-        raise HTTPException(status_code=400, detail="An account with this email already exists.")
+        raise HTTPException(status_code=409, detail=DUPLICATE_ACCOUNT_MESSAGE)
 
     mentor_object_id: Optional[ObjectId] = None
     if mentor_profile is not None:
         try:
-            mentor_object_id = _insert_mentor_document(mentor_profile)
+            mentor_object_id = _insert_mentor_document(mentor_profile, request.email)
         except Exception as exc:
             logger.exception("Failed to insert mentor document for %s", request.email)
             raise HTTPException(
@@ -141,7 +155,7 @@ async def register(request: RegisterRequest) -> TokenResponse:
         result = users.insert_one(user_doc)
     except DuplicateKeyError as exc:
         _rollback_mentor(mentor_object_id)
-        raise HTTPException(status_code=400, detail="An account with this email already exists.") from exc
+        raise HTTPException(status_code=409, detail=DUPLICATE_ACCOUNT_MESSAGE) from exc
     except Exception as exc:
         _rollback_mentor(mentor_object_id)
         logger.exception("Failed to insert user document for %s", request.email)
