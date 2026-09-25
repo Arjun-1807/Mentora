@@ -20,6 +20,15 @@ from app.models.schemas import EmailResponse, MentorMatch, StartupProfile
 
 logger = logging.getLogger(__name__)
 
+# Single client-facing message for every way email generation can fail
+# (missing key, Groq outage, unusable output). The real cause is logged.
+EMAIL_UNAVAILABLE_MESSAGE = "Email generation unavailable. Please try again."
+
+
+def _unavailable() -> HTTPException:
+    return HTTPException(status_code=503, detail=EMAIL_UNAVAILABLE_MESSAGE)
+
+
 SYSTEM_PROMPT = (
     "You are helping a startup founder write a short, professional introduction "
     "email to a mentor they have just been matched with. You will be given the "
@@ -54,10 +63,8 @@ def _build_user_prompt(startup_profile: StartupProfile, mentor: MentorMatch) -> 
 
 def _get_client() -> Groq:
     if not settings.GROQ_API_KEY:
-        raise HTTPException(
-            status_code=500,
-            detail="GROQ_API_KEY is not configured. Set it in your .env file.",
-        )
+        logger.error("Email generation requested but GROQ_API_KEY is not configured")
+        raise _unavailable()
     return Groq(api_key=settings.GROQ_API_KEY)
 
 
@@ -74,16 +81,18 @@ def _call_groq(startup_profile: StartupProfile, mentor: MentorMatch) -> str:
             response_format={"type": "json_object"},
         )
     except Exception as exc:
-        logger.exception("Groq API call failed")
+        logger.exception("Groq API call failed while drafting an intro email")
         # Generic client-facing message; the full error is in the logs.
-        raise HTTPException(
-            status_code=502,
-            detail="The language model service is temporarily unavailable. Please try again shortly.",
-        ) from exc
+        raise _unavailable() from exc
 
-    content = completion.choices[0].message.content
+    try:
+        content = completion.choices[0].message.content
+    except (AttributeError, IndexError, TypeError) as exc:
+        logger.exception("Groq returned an unexpected response shape for an intro email")
+        raise _unavailable() from exc
     if not content:
-        raise HTTPException(status_code=502, detail="Groq API returned an empty response.")
+        logger.error("Groq returned an empty response for an intro email")
+        raise _unavailable()
     return content
 
 
@@ -109,7 +118,8 @@ def _parse_email(raw_content: str) -> Optional[EmailResponse]:
 def generate_intro_email(startup_profile: StartupProfile, mentor: MentorMatch) -> EmailResponse:
     """Send startup + mentor context to Groq and return a validated EmailResponse.
 
-    Retries once on malformed/invalid JSON before raising a clean HTTPException.
+    Retries once on malformed/invalid JSON. Any failure (missing key, Groq
+    error, unusable output) surfaces as a 503 with a generic message.
     """
     raw_content = _call_groq(startup_profile, mentor)
     email = _parse_email(raw_content)
@@ -120,12 +130,7 @@ def generate_intro_email(startup_profile: StartupProfile, mentor: MentorMatch) -
         email = _parse_email(raw_content_retry)
 
     if email is None:
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Groq returned a response that could not be parsed into a valid "
-                "email draft after one retry. Please try again."
-            ),
-        )
+        logger.error("Groq intro-email response failed validation after one retry")
+        raise _unavailable()
 
     return email

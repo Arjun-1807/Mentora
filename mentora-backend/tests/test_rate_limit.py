@@ -3,7 +3,7 @@ import pytest
 
 from app.services import rate_limit
 from app.services.rate_limit import SlidingWindowRateLimiter
-from tests.conftest import STARTUP_PAYLOAD, auth_header, register
+from tests.conftest import DECK_TEXT, STARTUP_PAYLOAD, auth_header, register
 
 
 def test_sliding_window_allows_up_to_the_limit_then_blocks():
@@ -104,7 +104,7 @@ def text_pdf_bytes():
 
     document = pymupdf.open()
     page = document.new_page()
-    page.insert_text((72, 72), "Acme is a Fintech startup at MVP stage.")
+    page.insert_text((72, 72), DECK_TEXT)
     data = document.tobytes()
     document.close()
     return data

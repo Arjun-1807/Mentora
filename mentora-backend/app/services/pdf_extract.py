@@ -17,6 +17,13 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_CONTENT_TYPES = {"application/pdf"}
 
+# Decks yielding less text than this are treated as image-based/empty:
+# there is not enough content for the LLM to extract a meaningful profile.
+MIN_EXTRACTED_CHARS = 100
+
+NOT_PDF_MESSAGE = "Only PDF files are accepted"
+TOO_LITTLE_TEXT_MESSAGE = "Deck appears to be image-based or empty. Please upload a text-based PDF."
+
 # Size of each chunk read from the upload stream.
 _CHUNK_SIZE = 64 * 1024
 
@@ -45,18 +52,16 @@ async def _read_capped(file: UploadFile, max_bytes: int) -> bytes:
 async def extract_text_from_pdf(file: UploadFile) -> str:
     """Read an uploaded PDF file and return its concatenated text content.
 
-    Raises HTTPException for non-PDF uploads, empty files, oversized files
-    (413), or files that cannot be parsed / contain no extractable text
-    (e.g. scanned, image-only decks).
+    Raises HTTPException for non-PDF uploads (400), empty files (400),
+    oversized files (413), unparseable files (400), or files with fewer
+    than MIN_EXTRACTED_CHARS characters of extractable text (422, e.g.
+    scanned, image-only decks).
     """
     filename = file.filename or ""
     content_type = (file.content_type or "").lower()
 
     if content_type not in ALLOWED_CONTENT_TYPES and not filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type '{content_type or 'unknown'}'. Please upload a PDF file.",
-        )
+        raise HTTPException(status_code=400, detail=NOT_PDF_MESSAGE)
 
     raw_bytes = await _read_capped(file, settings.MAX_UPLOAD_BYTES)
     if not raw_bytes:
@@ -79,15 +84,13 @@ async def extract_text_from_pdf(file: UploadFile) -> str:
 
     text = "\n".join(pages_text).strip()
 
-    if not text:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"No extractable text found in this PDF ({page_count} page(s)). It looks "
-                "like a scanned or image-only deck. Please upload a text-based PDF "
-                "(e.g. exported directly from Keynote/PowerPoint/Google Slides) or run "
-                "it through OCR first."
-            ),
+    if len(text) < MIN_EXTRACTED_CHARS:
+        logger.info(
+            "Rejected PDF %r: only %d extractable character(s) across %d page(s)",
+            filename,
+            len(text),
+            page_count,
         )
+        raise HTTPException(status_code=422, detail=TOO_LITTLE_TEXT_MESSAGE)
 
     return text

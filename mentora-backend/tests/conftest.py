@@ -87,6 +87,12 @@ MENTOR_PAYLOAD = {
     },
 }
 
+# A pitch-deck text comfortably above /extract's 100-character minimum.
+DECK_TEXT = (
+    "Acme is a Fintech startup at MVP stage. We help small merchants in India "
+    "reconcile UPI payments automatically and are raising a seed round."
+)
+
 
 def register(client, payload) -> str:
     """Register a user and return their bearer token."""

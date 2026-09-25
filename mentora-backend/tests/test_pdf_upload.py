@@ -4,7 +4,7 @@ import pytest
 
 from app.config import settings
 from app.models.schemas import StartupProfile
-from tests.conftest import STARTUP_PAYLOAD, auth_header, register
+from tests.conftest import DECK_TEXT, STARTUP_PAYLOAD, auth_header, register
 
 
 @pytest.fixture
@@ -41,7 +41,7 @@ def test_extract_requires_authentication(client):
 def test_extract_accepts_a_text_pdf(client, token):
     response = client.post(
         "/extract",
-        files={"file": ("deck.pdf", _pdf("Acme, a Fintech startup at MVP stage."), "application/pdf")},
+        files={"file": ("deck.pdf", _pdf(DECK_TEXT), "application/pdf")},
         headers=auth_header(token),
     )
     assert response.status_code == 200
@@ -61,7 +61,7 @@ def test_extract_rejects_oversized_upload_with_413(client, token):
 
 def test_extract_accepts_upload_just_under_the_cap(client, token, monkeypatch):
     monkeypatch.setattr(settings, "MAX_UPLOAD_BYTES", 200_000)
-    payload = _pdf("Acme, a Fintech startup at MVP stage.")
+    payload = _pdf(DECK_TEXT)
     assert len(payload) < 200_000
     response = client.post(
         "/extract",
@@ -78,7 +78,8 @@ def test_extract_rejects_non_pdf(client, token):
         headers=auth_header(token),
     )
     assert response.status_code == 400
-    assert "PDF" in response.json()["detail"]
+    assert response.json()["error"] == "Only PDF files are accepted"
+    assert response.json()["detail"] == "Only PDF files are accepted"
 
 
 def test_extract_rejects_empty_file(client, token):
@@ -101,6 +102,9 @@ def test_extract_rejects_corrupt_pdf_without_leaking_internals(client, token):
     assert "corrupt" in response.json()["detail"].lower()
 
 
+IMAGE_BASED_MESSAGE = "Deck appears to be image-based or empty. Please upload a text-based PDF."
+
+
 def test_extract_rejects_image_only_pdf_with_actionable_message(client, token):
     """A scanned/image-only deck yields no text and must say so clearly."""
     response = client.post(
@@ -109,5 +113,27 @@ def test_extract_rejects_image_only_pdf_with_actionable_message(client, token):
         headers=auth_header(token),
     )
     assert response.status_code == 422
-    detail = response.json()["detail"].lower()
-    assert "scanned" in detail and "ocr" in detail
+    assert response.json()["error"] == IMAGE_BASED_MESSAGE
+
+
+def test_extract_rejects_pdf_with_under_100_chars_of_text(client, token):
+    response = client.post(
+        "/extract",
+        files={"file": ("thin.pdf", _pdf("Acme, a Fintech startup at MVP stage."), "application/pdf")},
+        headers=auth_header(token),
+    )
+    assert response.status_code == 422
+    assert response.json()["error"] == IMAGE_BASED_MESSAGE
+
+
+@pytest.mark.parametrize("second_line, expected", [(49, 200), (48, 422)])
+def test_extract_minimum_text_boundary_is_100_chars(client, token, second_line, expected):
+    # Two short lines (long single lines get clipped at the page edge):
+    # 50 + newline + 49 == 100 extracted characters.
+    text = "\n".join(["x" * 50, "y" * second_line])
+    response = client.post(
+        "/extract",
+        files={"file": ("deck.pdf", _pdf(text), "application/pdf")},
+        headers=auth_header(token),
+    )
+    assert response.status_code == expected

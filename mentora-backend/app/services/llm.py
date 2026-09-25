@@ -31,6 +31,27 @@ SYSTEM_PROMPT = (
     "Return valid JSON and nothing else."
 )
 
+# Used for the single retry after a response fails JSON/schema validation.
+STRICT_SYSTEM_PROMPT = (
+    "You are a JSON generator. Your previous answer could not be parsed. "
+    "Output EXACTLY one JSON object and NOTHING else: no markdown, no code "
+    "fences, no comments, no text before or after it.\n"
+    "The object MUST have exactly these four keys and types:\n"
+    '  "domain": string (non-empty), e.g. "Fintech"\n'
+    '  "stage": string, one of exactly "idea", "MVP", "growth" (case-sensitive)\n'
+    '  "challenges": array of strings (may be empty)\n'
+    '  "team_gaps": array of strings (may be empty)\n'
+    "Example of the required shape:\n"
+    '{"domain": "HealthTech", "stage": "MVP", "challenges": ["Clinical '
+    'validation"], "team_gaps": ["No CTO"]}'
+)
+
+# Client-facing message when both attempts fail validation.
+UNPARSEABLE_PROFILE_MESSAGE = (
+    "We couldn't turn this deck into a structured startup profile. "
+    "Please try again, or upload a more detailed deck."
+)
+
 
 def _build_user_prompt(text: str) -> str:
     # Truncate very long documents to keep the request within model context limits.
@@ -52,16 +73,16 @@ def _get_client() -> Groq:
     return Groq(api_key=settings.GROQ_API_KEY)
 
 
-def _call_groq(text: str) -> str:
+def _call_groq(text: str, system_prompt: str = SYSTEM_PROMPT, temperature: float = 0.2) -> str:
     client = _get_client()
     try:
         completion = client.chat.completions.create(
             model=settings.GROQ_MODEL,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": _build_user_prompt(text)},
             ],
-            temperature=0.2,
+            temperature=temperature,
             response_format={"type": "json_object"},
         )
     except Exception as exc:
@@ -101,23 +122,26 @@ def _parse_profile(raw_content: str) -> Optional[StartupProfile]:
 def extract_startup_profile(text: str) -> StartupProfile:
     """Send extracted document text to Groq and return a validated StartupProfile.
 
-    Retries once on malformed/invalid JSON before raising a clean HTTPException.
+    If the first response fails JSON/schema validation, retries exactly
+    once with STRICT_SYSTEM_PROMPT at temperature 0; if that also fails,
+    raises a 500 (the model misbehaved - not the client's fault).
     """
     raw_content = _call_groq(text)
     profile = _parse_profile(raw_content)
 
     if profile is None:
-        logger.warning("First Groq response failed validation, retrying once. Raw: %s", raw_content[:500])
-        raw_content_retry = _call_groq(text)
+        logger.warning(
+            "First Groq response failed validation, retrying once with the strict prompt. Raw: %s",
+            raw_content[:500],
+        )
+        raw_content_retry = _call_groq(text, system_prompt=STRICT_SYSTEM_PROMPT, temperature=0.0)
         profile = _parse_profile(raw_content_retry)
+        if profile is None:
+            logger.error(
+                "Strict-prompt retry also failed validation. Raw: %s", raw_content_retry[:500]
+            )
 
     if profile is None:
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Groq returned a response that could not be parsed into a valid "
-                "startup profile after one retry. Please try again."
-            ),
-        )
+        raise HTTPException(status_code=500, detail=UNPARSEABLE_PROFILE_MESSAGE)
 
     return profile
