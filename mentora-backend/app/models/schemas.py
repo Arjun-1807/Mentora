@@ -299,6 +299,30 @@ class FeedbackStatusResponse(BaseModel):
     status: str
 
 
+class EvaluateRequest(BaseModel):
+    """Request body for POST /evaluate."""
+
+    startup_profile: StartupProfile
+    ground_truth_mentor_ids: List[str] = Field(..., min_length=1)
+
+    @field_validator("ground_truth_mentor_ids")
+    @classmethod
+    def _non_empty_ids(cls, value: List[str]) -> List[str]:
+        cleaned = _clean_str_list(value)
+        if not cleaned:
+            raise ValueError("ground_truth_mentor_ids must contain at least one mentor id")
+        return cleaned
+
+
+class EvaluateResponse(BaseModel):
+    precision_at_5: float
+    recall_at_5: float
+    mrr: float
+    ndcg_at_5: float
+    avg_match_score: float
+    top_5_mentor_ids: List[str]
+
+
 class FeedbackResponse(BaseModel):
     success: bool
     new_effectiveness_score: float
