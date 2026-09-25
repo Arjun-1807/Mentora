@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import Navbar from "@/components/Navbar";
+import { FadeIn, Stagger } from "@/components/motion";
 
 const WIDTHS = {
   sm: "max-w-sm",
@@ -10,25 +10,23 @@ const WIDTHS = {
 };
 
 /**
- * Standard page frame: navbar + a `<main>` with the app's shared padding and
- * a centered content column. Keeps every route's gutters and max-widths in
- * one place instead of re-declaring them per page.
+ * Standard page frame: a `<main>` with the app's shared padding and a
+ * centered content column (the navbar is rendered once, in the root layout).
+ * The column is a <Stagger> container, so any <FadeIn>/<HoverCard> inside a
+ * page reveals in order, 0.1s apart.
  */
 export function PageShell({ children, width = "xl", center = false, className }) {
   return (
-    <>
-      <Navbar />
-      <main
-        className={cn(
-          "flex-1 w-full px-4 sm:px-6 py-10 sm:py-14",
-          center && "flex items-center justify-center"
-        )}
-      >
-        <div className={cn("w-full mx-auto", WIDTHS[width] ?? WIDTHS.xl, className)}>
-          {children}
-        </div>
-      </main>
-    </>
+    <main
+      className={cn(
+        "flex-1 w-full px-4 sm:px-6 py-10 sm:py-14",
+        center && "flex items-center justify-center"
+      )}
+    >
+      <Stagger className={cn("w-full mx-auto", WIDTHS[width] ?? WIDTHS.xl, className)}>
+        {children}
+      </Stagger>
+    </main>
   );
 }
 
@@ -46,19 +44,25 @@ export function PageHeader({ title, description, align = "left", actions, classN
       )}
     >
       <div className={cn(centered && "mx-auto max-w-2xl")}>
-        <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-foreground">
+        <FadeIn
+          as="h1"
+          className="text-2xl sm:text-3xl font-bold tracking-tight text-foreground"
+        >
           {title}
-        </h1>
+        </FadeIn>
         {description && (
-          <p className="mt-2 text-sm sm:text-base text-muted-foreground leading-relaxed">
+          <FadeIn
+            as="p"
+            className="mt-2 text-sm sm:text-base text-muted-foreground leading-relaxed"
+          >
             {description}
-          </p>
+          </FadeIn>
         )}
       </div>
       {actions && (
-        <div className={cn("flex items-center gap-2", centered && "mt-6 justify-center")}>
+        <FadeIn className={cn("flex items-center gap-2", centered && "mt-6 justify-center")}>
           {actions}
-        </div>
+        </FadeIn>
       )}
     </div>
   );
