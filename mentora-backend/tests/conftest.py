@@ -104,3 +104,13 @@ def register(client, payload) -> str:
 
 def auth_header(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
+
+
+def seed_mentor(fake_mongo, **fields) -> str:
+    """Insert a minimal mentor document so /match and /evaluate don't 404."""
+    from app.config import settings
+
+    doc = {"name": "Seed Mentor", "domain": "Fintech", "stage_focus": "MVP", "expertise": ["Fundraising"]}
+    doc.update(fields)
+    collection = fake_mongo[settings.MONGODB_DB_NAME][settings.MONGODB_MENTORS_COLLECTION]
+    return str(collection.insert_one(doc).inserted_id)

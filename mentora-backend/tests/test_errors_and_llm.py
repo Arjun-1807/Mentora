@@ -58,6 +58,7 @@ def test_unhandled_exceptions_return_generic_500_without_traceback(monkeypatch):
     def boom(_):
         raise RuntimeError("secret internal detail")
 
+    monkeypatch.setattr(match_router, "ensure_mentors_exist", lambda: None)
     monkeypatch.setattr(match_router, "find_matching_mentors", boom)
     with TestClient(app_main.app, raise_server_exceptions=False) as client:
         token = register(client, STARTUP_PAYLOAD)

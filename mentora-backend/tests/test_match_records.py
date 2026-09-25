@@ -2,7 +2,7 @@
 from app.config import settings
 from app.models.schemas import EmailResponse, MentorMatch, StartupProfile
 from app.services.matches import profile_fingerprint
-from tests.conftest import STARTUP_PAYLOAD, auth_header, register
+from tests.conftest import STARTUP_PAYLOAD, auth_header, register, seed_mentor
 
 PROFILE = {
     "domain": "Fintech",
@@ -44,6 +44,7 @@ def test_match_records_are_scoped_and_deduplicated(client, fake_mongo, monkeypat
     from app.routers import match as match_router
 
     monkeypatch.setattr(match_router, "find_matching_mentors", lambda profile: _fake_matches())
+    seed_mentor(fake_mongo)
 
     token = register(client, STARTUP_PAYLOAD)
     me = client.get("/me", headers=auth_header(token)).json()
@@ -80,6 +81,7 @@ def test_email_advances_match_to_emailed(client, fake_mongo, monkeypatch):
         "generate_intro_email",
         lambda profile, mentor: EmailResponse(subject="Hi", body="Body"),
     )
+    seed_mentor(fake_mongo)
 
     token = register(client, STARTUP_PAYLOAD)
     matches = client.post("/match", json=PROFILE, headers=auth_header(token)).json()["matches"]

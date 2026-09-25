@@ -23,7 +23,7 @@ from app.models.schemas import (
 )
 from app.services.auth_dependency import get_current_user
 from app.services.matches import record_matches
-from app.services.mentor_matching import find_matching_mentors
+from app.services.mentor_matching import ensure_mentors_exist, find_matching_mentors
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,10 @@ async def match_mentors(profile: StartupProfile, user=Depends(get_current_user))
     same profile refreshes the existing records rather than duplicating
     history. The returned `match_id` is the handle to pass to /email and
     /feedback.
+
+    Returns 404 if no mentor profiles exist at all (unseeded database).
     """
+    ensure_mentors_exist()
     matches = find_matching_mentors(profile)
 
     if matches:
@@ -150,6 +153,7 @@ async def list_mentors(
             stage_focus=doc.get("stage_focus") or "Unknown",
             expertise=doc.get("expertise") or [],
             geography=doc.get("geography"),
+            email=doc.get("email"),
             effectiveness_score=doc.get("effectiveness_score"),
             feedback_count=int(doc.get("feedback_count") or 0),
         )

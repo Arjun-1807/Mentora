@@ -7,9 +7,14 @@ Usage:
     python seed_mentors.py
 
 Requires MONGODB_URI to be set in .env (see .env.example). This script
-clears the existing `mentors` collection and re-inserts all 15 profiles,
-so it is safe to re-run any time you change the mentor data or the
-embedding model.
+removes the previously seeded mentors - every mentor document NOT linked
+to a registered user account (no `user_id`) - and re-inserts all 15
+profiles, so it is safe to re-run any time you change the mentor data or
+the embedding model. Mentors who registered through the app are kept.
+
+Each seeded mentor gets a realistic but fake contact email on the
+clearly fake `mentors.mentora.dev` domain (do not expect delivery), used by the frontend's
+"send intro email" flow.
 
 Note: passage-side text is embedded WITHOUT the BGE query instruction
 prefix, matching the convention used for query-side embeddings in
@@ -29,11 +34,13 @@ class MentorSeed(TypedDict):
     stage_focus: str
     expertise: List[str]
     geography: str
+    email: str
 
 
 MENTORS: List[MentorSeed] = [
     {
         "name": "Ava Chen",
+        "email": "ava.chen@mentors.mentora.dev",
         "domain": "Fintech",
         "stage_focus": "idea",
         "expertise": ["Fundraising", "Product-Market Fit", "Regulatory Compliance"],
@@ -41,6 +48,7 @@ MENTORS: List[MentorSeed] = [
     },
     {
         "name": "Marcus Reid",
+        "email": "marcus.reid@mentors.mentora.dev",
         "domain": "Fintech",
         "stage_focus": "growth",
         "expertise": ["B2B Sales", "Go-to-Market", "Scaling Operations"],
@@ -48,6 +56,7 @@ MENTORS: List[MentorSeed] = [
     },
     {
         "name": "Priya Nair",
+        "email": "priya.nair@mentors.mentora.dev",
         "domain": "HealthTech",
         "stage_focus": "MVP",
         "expertise": ["Product-Market Fit", "Clinical Partnerships", "Regulatory Compliance"],
@@ -55,6 +64,7 @@ MENTORS: List[MentorSeed] = [
     },
     {
         "name": "David Okafor",
+        "email": "david.okafor@mentors.mentora.dev",
         "domain": "HealthTech",
         "stage_focus": "growth",
         "expertise": ["Fundraising", "Hiring", "Go-to-Market"],
@@ -62,6 +72,7 @@ MENTORS: List[MentorSeed] = [
     },
     {
         "name": "Elena Petrova",
+        "email": "elena.petrova@mentors.mentora.dev",
         "domain": "EdTech",
         "stage_focus": "idea",
         "expertise": ["Product-Market Fit", "User Research", "Curriculum Design"],
@@ -69,6 +80,7 @@ MENTORS: List[MentorSeed] = [
     },
     {
         "name": "Tom Sullivan",
+        "email": "tom.sullivan@mentors.mentora.dev",
         "domain": "EdTech",
         "stage_focus": "MVP",
         "expertise": ["Go-to-Market", "B2B Sales", "Partnerships"],
@@ -76,6 +88,7 @@ MENTORS: List[MentorSeed] = [
     },
     {
         "name": "Sofia Marquez",
+        "email": "sofia.marquez@mentors.mentora.dev",
         "domain": "SaaS",
         "stage_focus": "MVP",
         "expertise": ["Technical Architecture", "Product-Market Fit", "Hiring"],
@@ -83,6 +96,7 @@ MENTORS: List[MentorSeed] = [
     },
     {
         "name": "James Whitfield",
+        "email": "james.whitfield@mentors.mentora.dev",
         "domain": "SaaS",
         "stage_focus": "growth",
         "expertise": ["B2B Sales", "Fundraising", "Scaling Operations"],
@@ -90,6 +104,7 @@ MENTORS: List[MentorSeed] = [
     },
     {
         "name": "Grace Kim",
+        "email": "grace.kim@mentors.mentora.dev",
         "domain": "E-commerce",
         "stage_focus": "idea",
         "expertise": ["Go-to-Market", "Branding", "Supply Chain"],
@@ -97,6 +112,7 @@ MENTORS: List[MentorSeed] = [
     },
     {
         "name": "Ben Alaoui",
+        "email": "ben.alaoui@mentors.mentora.dev",
         "domain": "E-commerce",
         "stage_focus": "growth",
         "expertise": ["Fundraising", "Scaling Operations", "B2B Sales"],
@@ -104,6 +120,7 @@ MENTORS: List[MentorSeed] = [
     },
     {
         "name": "Nadia Hassan",
+        "email": "nadia.hassan@mentors.mentora.dev",
         "domain": "AI/ML",
         "stage_focus": "idea",
         "expertise": ["Technical Architecture", "Product-Market Fit", "Hiring"],
@@ -111,6 +128,7 @@ MENTORS: List[MentorSeed] = [
     },
     {
         "name": "Liam O'Connor",
+        "email": "liam.oconnor@mentors.mentora.dev",
         "domain": "AI/ML",
         "stage_focus": "MVP",
         "expertise": ["Fundraising", "Technical Architecture", "Go-to-Market"],
@@ -118,6 +136,7 @@ MENTORS: List[MentorSeed] = [
     },
     {
         "name": "Chloe Dubois",
+        "email": "chloe.dubois@mentors.mentora.dev",
         "domain": "Climate Tech",
         "stage_focus": "idea",
         "expertise": ["Fundraising", "Product-Market Fit", "Regulatory Compliance"],
@@ -125,6 +144,7 @@ MENTORS: List[MentorSeed] = [
     },
     {
         "name": "Ravi Deshmukh",
+        "email": "ravi.deshmukh@mentors.mentora.dev",
         "domain": "Climate Tech",
         "stage_focus": "growth",
         "expertise": ["Go-to-Market", "B2B Sales", "Scaling Operations"],
@@ -132,6 +152,7 @@ MENTORS: List[MentorSeed] = [
     },
     {
         "name": "Hannah Fischer",
+        "email": "hannah.fischer@mentors.mentora.dev",
         "domain": "SaaS",
         "stage_focus": "idea",
         "expertise": ["Product-Market Fit", "User Research", "Hiring"],
@@ -144,9 +165,10 @@ def main() -> None:
     print(f"Connecting to MongoDB at {settings.MONGODB_URI!r}, db={settings.MONGODB_DB_NAME!r} ...")
     collection = get_mentors_collection()
 
-    print(f"Clearing existing documents in '{collection.name}' collection ...")
-    delete_result = collection.delete_many({})
-    print(f"  Deleted {delete_result.deleted_count} existing document(s).")
+    print(f"Clearing previously seeded documents in '{collection.name}' collection ...")
+    # Only mentors without a linked user account; registered mentors stay.
+    delete_result = collection.delete_many({"user_id": {"$exists": False}})
+    print(f"  Deleted {delete_result.deleted_count} existing seeded document(s).")
 
     print(f"Loading embedding model '{settings.EMBEDDING_MODEL_NAME}' (this may take a while on first run) ...")
 
@@ -173,6 +195,9 @@ def main() -> None:
                 "stage_focus": mentor["stage_focus"],
                 "expertise": mentor["expertise"],
                 "geography": mentor["geography"],
+                "email": mentor["email"],
+                "preferred_stages": [mentor["stage_focus"]],
+                "seeded": True,
                 "embedding": embedding,
                 # No feedback yet for freshly seeded mentors; left unset until
                 # POST /feedback recomputes it as a rolling average rating.

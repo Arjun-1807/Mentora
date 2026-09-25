@@ -13,7 +13,9 @@ Score convention: match_score is a float in the 0-1 range, computed as
 
 where:
   - cosine_score is the raw $vectorSearch score, clamped to [0, 1].
-  - stage_match is 1.0 if mentor.stage_focus == startup.stage, else 0.0.
+  - stage_match is 1.0 if mentor.stage_focus == startup.stage, or the
+    startup's stage is in mentor.preferred_stages, or the mentor covers
+    "all" stages (all case-insensitive), else 0.0.
   - domain_match is 1.0 if mentor.domain == startup.domain (case-insensitive), else 0.0.
   - geography_match is 1.0 if mentor.geography == startup.geography (case-insensitive,
     both present), else 0.0.
@@ -21,7 +23,7 @@ where:
     (mentors with no feedback yet contribute 0 here).
 """
 import logging
-from typing import List
+from typing import Iterable, List, Optional
 
 from fastapi import HTTPException
 
@@ -43,6 +45,42 @@ EFFECTIVENESS_WEIGHT = 0.10
 # How many raw candidates to pull from vector search before re-ranking.
 VECTOR_SEARCH_CANDIDATE_LIMIT = 20
 TOP_K_RESULTS = 5
+
+# Stage value meaning "mentors startups at any stage".
+ALL_STAGES = "all"
+
+
+def _stage_matches(profile_stage: str, stage_focus: Optional[str], preferred_stages: Optional[Iterable]) -> bool:
+    """True if a mentor with this stage_focus / preferred_stages covers profile_stage."""
+    stages = {(stage_focus or "").strip().lower()}
+    if isinstance(preferred_stages, (list, tuple, set)):
+        stages.update(str(s).strip().lower() for s in preferred_stages if s)
+    stages.discard("")
+    if not stages:
+        return False
+    return ALL_STAGES in stages or (bool(profile_stage) and profile_stage in stages)
+
+
+NO_MENTORS_MESSAGE = "No mentor profiles found. Please seed the database."
+
+
+def ensure_mentors_exist() -> None:
+    """Raise 404 if the mentors collection is empty.
+
+    Called by the /match and /evaluate routers *before* running the
+    pipeline, so an unseeded database gets an actionable error instead of
+    an empty result (or an opaque vector-search failure).
+    """
+    try:
+        has_any = get_mentors_collection().find_one({}, {"_id": 1}) is not None
+    except Exception as exc:
+        logger.exception("Failed to check whether any mentor profiles exist")
+        raise HTTPException(
+            status_code=502,
+            detail="Mentor search is temporarily unavailable. Please try again shortly.",
+        ) from exc
+    if not has_any:
+        raise HTTPException(status_code=404, detail=NO_MENTORS_MESSAGE)
 
 
 def _run_vector_search(embedding: List[float]) -> List[dict]:
@@ -66,6 +104,8 @@ def _run_vector_search(embedding: List[float]) -> List[dict]:
                 "stage_focus": 1,
                 "expertise": 1,
                 "geography": 1,
+                "email": 1,
+                "preferred_stages": 1,
                 "effectiveness_score": 1,
                 "score": {"$meta": "vectorSearchScore"},
             }
@@ -113,11 +153,14 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
         cosine_score = max(0.0, min(1.0, float(candidate.get("score", 0.0))))
 
         candidate_domain = (candidate.get("domain") or "").strip().lower()
-        candidate_stage = (candidate.get("stage_focus") or "").strip().lower()
         candidate_geography = (candidate.get("geography") or "").strip().lower()
         candidate_effectiveness = candidate.get("effectiveness_score")
 
-        stage_match = 1.0 if candidate_stage and candidate_stage == profile_stage else 0.0
+        stage_match = (
+            1.0
+            if _stage_matches(profile_stage, candidate.get("stage_focus"), candidate.get("preferred_stages"))
+            else 0.0
+        )
         domain_match = 1.0 if candidate_domain and candidate_domain == profile_domain else 0.0
         geography_match = (
             1.0 if profile_geography and candidate_geography and candidate_geography == profile_geography else 0.0
@@ -136,11 +179,14 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
         ranked.append(
             MentorMatch(
                 mentor_id=str(candidate.get("_id", "")),
-                name=candidate.get("name", "Unknown"),
-                domain=candidate.get("domain", "Unknown"),
-                stage_focus=candidate.get("stage_focus", "Unknown"),
-                expertise=candidate.get("expertise", []),
+                name=candidate.get("name") or "Unknown",
+                domain=candidate.get("domain") or "Unknown",
+                stage_focus=candidate.get("stage_focus") or "Unknown",
+                expertise=candidate.get("expertise") or [],
                 match_score=round(final_score, 4),
+                email=candidate.get("email"),
+                geography=candidate.get("geography"),
+                similarity=round(cosine_score, 4),
             )
         )
 

@@ -54,6 +54,11 @@ class MentorMatch(BaseModel):
     match_id: Optional[str] = Field(
         default=None, description="Id of the persisted match record; pass to /email and /feedback"
     )
+    email: Optional[str] = Field(default=None, description="Mentor's contact email, if known")
+    geography: Optional[str] = None
+    similarity: Optional[float] = Field(
+        default=None, description="Raw vector-search cosine similarity, clamped to [0, 1]"
+    )
 
 
 class MatchResponse(BaseModel):
@@ -89,6 +94,7 @@ class MentorListItem(BaseModel):
     stage_focus: str
     expertise: List[str] = Field(default_factory=list)
     geography: Optional[str] = None
+    email: Optional[str] = None
     effectiveness_score: Optional[float] = None
     feedback_count: int = 0
 

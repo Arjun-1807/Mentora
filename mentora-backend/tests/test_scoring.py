@@ -128,3 +128,36 @@ def test_weights_sum_to_one():
         + mentor_matching.EFFECTIVENESS_WEIGHT
     )
     assert total == pytest.approx(1.0)
+
+
+# --- stage coverage via preferred_stages / "all" -----------------------------
+
+def _stage_only(**overrides) -> dict:
+    """A candidate whose only possible score contribution is the stage match."""
+    return _candidate(domain="Other", geography=None, effectiveness_score=None, score=0.0, **overrides)
+
+
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        ({"stage_focus": "growth", "preferred_stages": ["idea", "MVP"]}, 0.2),
+        ({"stage_focus": "growth", "preferred_stages": ["mvp"]}, 0.2),
+        ({"stage_focus": "all"}, 0.2),
+        ({"stage_focus": "growth", "preferred_stages": ["all"]}, 0.2),
+        ({"stage_focus": "growth", "preferred_stages": ["growth"]}, 0.0),
+        ({"stage_focus": "growth"}, 0.0),
+        ({"stage_focus": None, "preferred_stages": None}, 0.0),
+    ],
+)
+def test_preferred_stages_and_all_count_as_stage_match(fake_vector_search, overrides, expected):
+    fake_vector_search([_stage_only(**overrides)])
+    [match] = find_matching_mentors(PROFILE)
+    assert match.match_score == pytest.approx(expected)
+
+
+def test_match_exposes_similarity_email_and_geography(fake_vector_search):
+    fake_vector_search([_candidate(score=0.83, email="ava@example.com")])
+    [match] = find_matching_mentors(PROFILE)
+    assert match.similarity == pytest.approx(0.83)
+    assert match.email == "ava@example.com"
+    assert match.geography == "San Francisco, CA"
