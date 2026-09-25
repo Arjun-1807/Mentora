@@ -17,10 +17,15 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/hooks/use-auth";
 
-const NAV_LINKS = [
+const STARTUP_LINKS = [
   { href: "/upload", label: "Upload" },
   { href: "/matches", label: "Matches" },
   { href: "/dashboard", label: "Dashboard" },
+];
+
+const MENTOR_LINKS = [
+  { href: "/dashboard", label: "Dashboard" },
+  { href: "/onboarding/mentor", label: "My profile" },
 ];
 
 function displayName(user) {
@@ -48,6 +53,11 @@ export default function Navbar() {
 
   const name = displayName(user);
   const initials = initialsFor(user);
+  const isMentor = user?.role === "mentor";
+  const navLinks = isMentor ? MENTOR_LINKS : STARTUP_LINKS;
+  const profileLink = isMentor
+    ? { href: "/onboarding/mentor", label: "Mentor profile" }
+    : { href: "/profile", label: "Startup profile" };
 
   return (
     <header className="border-b border-border bg-background/80 backdrop-blur sticky top-0 z-20">
@@ -67,7 +77,7 @@ export default function Navbar() {
         {status === "signed-in" ? (
           <nav aria-label="Main" className="flex items-center gap-1 sm:gap-4">
             <ul className="hidden sm:flex items-center gap-4 text-sm">
-              {NAV_LINKS.map((link) => {
+              {navLinks.map((link) => {
                 const active = pathname === link.href;
                 return (
                   <li key={link.href}>
@@ -110,16 +120,16 @@ export default function Navbar() {
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup className="sm:hidden">
-                  {NAV_LINKS.map((link) => (
+                  {navLinks.map((link) => (
                     <DropdownMenuItem key={link.href} render={<Link href={link.href} />}>
                       {link.label}
                     </DropdownMenuItem>
                   ))}
                   <DropdownMenuSeparator />
                 </DropdownMenuGroup>
-                <DropdownMenuItem render={<Link href="/profile" />}>
+                <DropdownMenuItem render={<Link href={profileLink.href} />}>
                   <User aria-hidden="true" />
-                  Startup profile
+                  {profileLink.label}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem variant="destructive" onClick={handleSignOut}>

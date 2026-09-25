@@ -6,6 +6,7 @@ import Link from "next/link";
 import { toast } from "sonner";
 import { PageShell } from "@/components/PageShell";
 import { InlineError } from "@/components/StateCard";
+import { HoverCard } from "@/components/motion";
 import {
   Card,
   CardHeader,
@@ -20,8 +21,21 @@ import { Loader2 } from "lucide-react";
 import { login, tokenFromAuthResponse } from "@/lib/api";
 import { setToken } from "@/lib/storage";
 
+/**
+ * Reads the `role` claim from a JWT without verifying it — only used to pick
+ * a landing page; the backend still verifies the token on every request.
+ */
+function roleFromToken(token) {
+  try {
+    const payload = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    return JSON.parse(atob(payload))?.role || null;
+  } catch {
+    return null;
+  }
+}
+
 /** Where to land after signing in — honours `?next=` set by the auth guard. */
-function nextDestination() {
+function nextDestination(role) {
   try {
     const next = new URLSearchParams(window.location.search).get("next");
     // Only allow same-origin paths.
@@ -29,7 +43,7 @@ function nextDestination() {
   } catch {
     // ignore
   }
-  return "/upload";
+  return role === "mentor" ? "/dashboard" : "/upload";
 }
 
 export default function LoginPage() {
@@ -53,7 +67,7 @@ export default function LoginPage() {
       }
       setToken(token);
       toast.success("Signed in.");
-      router.push(nextDestination());
+      router.push(nextDestination(roleFromToken(token)));
     } catch (err) {
       setError(err.message || "Could not sign in.");
       setLoading(false);
@@ -62,57 +76,59 @@ export default function LoginPage() {
 
   return (
     <PageShell width="md" center>
-      <Card>
-        <CardHeader>
-          <CardTitle>Sign in</CardTitle>
-          <CardDescription>
-            Welcome back. Sign in to continue to Mentora.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="login-email">Email</Label>
-              <Input
-                id="login-email"
-                name="email"
-                type="email"
-                autoComplete="email"
-                required
-                disabled={loading}
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="login-password">Password</Label>
-              <Input
-                id="login-password"
-                name="password"
-                type="password"
-                autoComplete="current-password"
-                required
-                disabled={loading}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
+      <HoverCard>
+        <Card>
+          <CardHeader>
+            <CardTitle>Sign in</CardTitle>
+            <CardDescription>
+              Welcome back. Sign in to continue to Mentora.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="login-email">Email</Label>
+                <Input
+                  id="login-email"
+                  name="email"
+                  type="email"
+                  autoComplete="email"
+                  required
+                  disabled={loading}
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="login-password">Password</Label>
+                <Input
+                  id="login-password"
+                  name="password"
+                  type="password"
+                  autoComplete="current-password"
+                  required
+                  disabled={loading}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+              </div>
 
-            {error && <InlineError message={error} />}
+              {error && <InlineError message={error} />}
 
-            <Button type="submit" className="w-full" disabled={loading}>
-              {loading && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
-              {loading ? "Signing in…" : "Sign In"}
-            </Button>
-          </form>
-          <p className="mt-6 text-center text-sm text-muted-foreground">
-            Don&apos;t have an account?{" "}
-            <Link href="/register" className="text-primary hover:underline">
-              Register
-            </Link>
-          </p>
-        </CardContent>
-      </Card>
+              <Button type="submit" className="w-full" disabled={loading}>
+                {loading && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+                {loading ? "Signing in…" : "Sign In"}
+              </Button>
+            </form>
+            <p className="mt-6 text-center text-sm text-muted-foreground">
+              Don&apos;t have an account?{" "}
+              <Link href="/register" className="text-primary hover:underline">
+                Register
+              </Link>
+            </p>
+          </CardContent>
+        </Card>
+      </HoverCard>
     </PageShell>
   );
 }
