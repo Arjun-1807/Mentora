@@ -11,7 +11,7 @@ This module is the single source of truth for that convention so that
 /match (query side) and seed_mentors.py (passage side) stay consistent.
 """
 from functools import lru_cache
-from typing import List
+from typing import List, Optional
 
 from sentence_transformers import SentenceTransformer
 
@@ -63,14 +63,33 @@ def build_startup_profile_text(domain: str, stage: str, challenges: List[str], t
     )
 
 
-def build_mentor_profile_text(domain: str, stage_focus: str, expertise: List[str]) -> str:
+def build_mentor_profile_text(
+    domain: str,
+    stage_focus: str,
+    expertise: List[str],
+    *,
+    bio: Optional[str] = None,
+    past_exits: Optional[str] = None,
+    years_experience: Optional[str] = None,
+) -> str:
     """Build a descriptive text representation of a mentor profile for embedding.
 
     Kept structurally similar to build_startup_profile_text() so that the
     query and passage embeddings live in a comparable semantic space.
+
+    The keyword-only extras come from mentor onboarding; each is appended
+    only when provided, so the text for seeded mentors (which have none of
+    them) is byte-identical to before.
     """
     expertise_str = ", ".join(expertise) if expertise else "general mentorship"
-    return (
+    text = (
         f"Domain: {domain}. Stage focus: {stage_focus}. "
         f"Expertise: {expertise_str}."
     )
+    if years_experience:
+        text += f" Experience: {years_experience} years."
+    if past_exits:
+        text += f" Past exits: {past_exits}."
+    if bio:
+        text += f" Bio: {bio}"
+    return text

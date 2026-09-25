@@ -42,11 +42,13 @@ def fake_mongo(monkeypatch):
 def no_embedding_model(monkeypatch):
     """Never load (or download) the real embedding model in tests."""
     from app.routers import auth as auth_router
+    from app.routers import mentor as mentor_router
     from app.services import embeddings, mentor_matching
 
     monkeypatch.setattr(embeddings, "embed_passage", fake_embedding)
     monkeypatch.setattr(embeddings, "embed_query", fake_embedding)
     monkeypatch.setattr(auth_router, "embed_passage", fake_embedding)
+    monkeypatch.setattr(mentor_router, "embed_passage", fake_embedding)
     monkeypatch.setattr(mentor_matching, "embed_query", fake_embedding)
 
 

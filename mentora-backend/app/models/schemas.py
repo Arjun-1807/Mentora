@@ -23,6 +23,27 @@ MatchStatus = Literal["pending", "emailed", "email_sent", "completed"]
 # "completed" is deliberately excluded: it is only reachable via /feedback.
 ClientSettableMatchStatus = Literal["emailed", "email_sent"]
 
+# Mentor onboarding vocabularies (PATCH /mentor/profile).
+MentorGeography = Literal["Bangalore", "Mumbai", "Delhi", "Hyderabad", "Chennai", "Other"]
+MentorSector = Literal[
+    "Clean Energy",
+    "EdTech",
+    "FinTech",
+    "HealthTech",
+    "AgriTech",
+    "SaaS",
+    "D2C",
+    "DeepTech",
+    "Logistics",
+    "Others",
+]
+YearsExperience = Literal["1-3", "3-5", "5-10", "10+"]
+MaxStartupsPerMonth = Literal["1", "2", "3", "5+"]
+MentorAvailability = Literal["Weekdays", "Weekends", "Flexible"]
+
+MAX_BIO_LENGTH = 300
+MAX_PAST_EXITS_LENGTH = 300
+
 # Minimum password length enforced at registration.
 MIN_PASSWORD_LENGTH = 8
 # bcrypt truncates/rejects beyond 72 bytes; we reject explicitly instead.
@@ -180,6 +201,62 @@ class MentorProfileIn(BaseModel):
             self.expertise = list(self.sector_expertise)
         if not self.preferred_stages:
             self.preferred_stages = [self.stage_focus]
+
+
+class MentorProfileUpdate(BaseModel):
+    """Request body for PATCH /mentor/profile (mentor onboarding)."""
+
+    name: str = Field(..., min_length=1, max_length=100)
+    linkedin_url: Optional[str] = None
+    bio: Optional[str] = Field(default=None, max_length=MAX_BIO_LENGTH)
+    geography: MentorGeography
+    sector_expertise: List[MentorSector] = Field(..., min_length=1)
+    years_experience: YearsExperience
+    past_exits: Optional[str] = Field(default=None, max_length=MAX_PAST_EXITS_LENGTH)
+    preferred_stages: List[MentorStage] = Field(..., min_length=1)
+    max_startups_per_month: MaxStartupsPerMonth
+    availability: MentorAvailability
+
+    @field_validator("name")
+    @classmethod
+    def _non_blank_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("name must not be blank")
+        return value
+
+    @field_validator("linkedin_url", "bio", "past_exits")
+    @classmethod
+    def _blank_to_none(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @field_validator("linkedin_url")
+    @classmethod
+    def _http_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        lowered = value.lower()
+        if not (lowered.startswith("http://") or lowered.startswith("https://")) or len(value) < 11:
+            raise ValueError("linkedin_url must be an http(s) URL")
+        return value
+
+    @field_validator("sector_expertise", "preferred_stages")
+    @classmethod
+    def _dedupe(cls, value: List[str]) -> List[str]:
+        deduped: List[str] = []
+        for item in value:
+            if item not in deduped:
+                deduped.append(item)
+        return deduped
+
+
+class MentorProfileUpdateResponse(BaseModel):
+    success: bool
+    mentor_id: str
+    profile: Dict[str, Any]
 
 
 class EmailRequest(BaseModel):
