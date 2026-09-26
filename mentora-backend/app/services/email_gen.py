@@ -32,11 +32,15 @@ def _unavailable() -> HTTPException:
 SYSTEM_PROMPT = (
     "You are helping a startup founder write a short, professional introduction "
     "email to a mentor they have just been matched with. You will be given the "
-    "startup's profile (domain, stage, challenges, team gaps) and the mentor's "
-    "profile (name, domain, expertise). Write a concise, warm, professional email "
+    "startup's profile (domain, stage, challenges, team gaps), the founder's name, "
+    "and the mentor's profile (name, domain, expertise). Write a concise, warm, professional email "
     "FROM the startup TO the mentor: introduce the startup briefly, reference 1-2 "
     "of the startup's specific challenges, explain why the mentor's expertise is "
     "relevant, and request a short introductory call. Keep it short (under 150 words).\n\n"
+    "CRITICAL REQUIREMENTS:\n"
+    "- Address the email to the mentor by their specific name.\n"
+    "- Sign off the email using the founder's specific name.\n"
+    "- At the very bottom of the email body, add this exact sentence on a new line: 'This email is sent by Mentora.'\n\n"
     "Return ONLY a single JSON object (no prose, no markdown fences) with exactly "
     'these fields:\n  "subject": a short, specific email subject line.\n  "body": '
     "the full email body text (plain text, may include line breaks).\n"
@@ -44,10 +48,11 @@ SYSTEM_PROMPT = (
 )
 
 
-def _build_user_prompt(startup_profile: StartupProfile, mentor: MentorMatch) -> str:
+def _build_user_prompt(startup_profile: StartupProfile, mentor: MentorMatch, founder_name: str) -> str:
     challenges = ", ".join(startup_profile.challenges) if startup_profile.challenges else "no specific challenges listed"
     expertise = ", ".join(mentor.expertise) if mentor.expertise else "general mentorship"
     return (
+        f"Founder name: {founder_name}\n\n"
         f"Startup profile:\n"
         f"  Domain: {startup_profile.domain}\n"
         f"  Stage: {startup_profile.stage}\n"
@@ -68,14 +73,14 @@ def _get_client() -> Groq:
     return Groq(api_key=settings.GROQ_API_KEY)
 
 
-def _call_groq(startup_profile: StartupProfile, mentor: MentorMatch) -> str:
+def _call_groq(startup_profile: StartupProfile, mentor: MentorMatch, founder_name: str) -> str:
     client = _get_client()
     try:
         completion = client.chat.completions.create(
             model=settings.GROQ_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _build_user_prompt(startup_profile, mentor)},
+                {"role": "user", "content": _build_user_prompt(startup_profile, mentor, founder_name)},
             ],
             temperature=0.4,
             response_format={"type": "json_object"},
@@ -115,18 +120,18 @@ def _parse_email(raw_content: str) -> Optional[EmailResponse]:
         return None
 
 
-def generate_intro_email(startup_profile: StartupProfile, mentor: MentorMatch) -> EmailResponse:
+def generate_intro_email(startup_profile: StartupProfile, mentor: MentorMatch, founder_name: str) -> EmailResponse:
     """Send startup + mentor context to Groq and return a validated EmailResponse.
 
     Retries once on malformed/invalid JSON. Any failure (missing key, Groq
     error, unusable output) surfaces as a 503 with a generic message.
     """
-    raw_content = _call_groq(startup_profile, mentor)
+    raw_content = _call_groq(startup_profile, mentor, founder_name)
     email = _parse_email(raw_content)
 
     if email is None:
         logger.warning("First Groq response failed validation, retrying once. Raw: %s", raw_content[:500])
-        raw_content_retry = _call_groq(startup_profile, mentor)
+        raw_content_retry = _call_groq(startup_profile, mentor, founder_name)
         email = _parse_email(raw_content_retry)
 
     if email is None:
