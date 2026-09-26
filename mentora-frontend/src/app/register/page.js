@@ -21,7 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Loader2 } from "lucide-react";
 import { register, tokenFromAuthResponse } from "@/lib/api";
-import { setToken } from "@/lib/storage";
+import { setToken, setUserRole } from "@/lib/storage";
 import { MIN_PASSWORD_LENGTH, SECTOR_OPTIONS, validateRegistration } from "@/lib/validation";
 
 function FieldError({ id, message }) {
@@ -86,6 +86,7 @@ export default function RegisterPage() {
       const token = tokenFromAuthResponse(data);
       if (token) {
         setToken(token);
+        setUserRole(role);
         toast.success("Account created.");
         router.push(role === "mentor" ? "/onboarding/mentor" : "/upload");
       } else {

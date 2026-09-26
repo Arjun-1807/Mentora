@@ -6,9 +6,11 @@ Rate-limited per authenticated user (each call costs Groq tokens) and, if
 a `match_id` is supplied, advances that match record to status "emailed".
 """
 import logging
+from bson import ObjectId
 
 from fastapi import APIRouter, Depends
 
+from app.db.mongo import get_users_collection
 from app.models.schemas import EmailRequest, EmailResponse
 from app.services.auth_dependency import get_current_user
 from app.services.email_gen import generate_intro_email
@@ -33,7 +35,15 @@ async def draft_intro_email(request: EmailRequest, user=Depends(get_current_user
     user_id = str(user.get("sub", ""))
     rate_limit_llm_for_user(user_id)
 
-    email = generate_intro_email(request.startup_profile, request.mentor)
+    # Fetch founder's name from the DB
+    try:
+        user_doc = get_users_collection().find_one({"_id": ObjectId(user_id)}, {"profile.name": 1})
+        founder_name = user_doc.get("profile", {}).get("name", "Founder") if user_doc else "Founder"
+    except Exception:
+        logger.exception("Failed to look up founder name for user %s", user_id)
+        founder_name = "Founder"
+
+    email = generate_intro_email(request.startup_profile, request.mentor, founder_name)
 
     match_id = request.match_id or request.mentor.match_id
     if match_id:

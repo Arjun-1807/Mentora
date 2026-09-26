@@ -523,7 +523,7 @@ function DashboardPageContent() {
 
 export default function DashboardPage() {
   return (
-    <AuthGuard>
+    <AuthGuard requiredRole="startup">
       <DashboardPageContent />
     </AuthGuard>
   );

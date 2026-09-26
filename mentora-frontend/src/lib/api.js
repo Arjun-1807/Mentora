@@ -287,3 +287,23 @@ export function register(payload) {
 export function tokenFromAuthResponse(data) {
   return data?.access_token || data?.token || data?.jwt || null;
 }
+
+/**
+ * Fetches the mentor's own incoming match requests.
+ * Query param `status` is optional comma-separated filter e.g. "accepted,met".
+ */
+export function getMentorMatches({ status } = {}) {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request(`/mentor/matches${qs}`, { method: "GET" });
+}
+
+/**
+ * Accepts or declines a specific match request (mentor side).
+ * status must be "accepted" | "declined".
+ */
+export function updateMentorMatchStatus(matchId, status) {
+  return request(`/mentor/matches/${encodeURIComponent(matchId)}`, {
+    method: "PATCH",
+    body: { status },
+  });
+}

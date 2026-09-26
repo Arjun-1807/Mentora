@@ -19,7 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2 } from "lucide-react";
 import { login, tokenFromAuthResponse } from "@/lib/api";
-import { setToken } from "@/lib/storage";
+import { setToken, setUserRole } from "@/lib/storage";
 
 /**
  * Reads the `role` claim from a JWT without verifying it — only used to pick
@@ -43,7 +43,7 @@ function nextDestination(role) {
   } catch {
     // ignore
   }
-  return role === "mentor" ? "/dashboard" : "/upload";
+  return role === "mentor" ? "/mentor/dashboard" : "/upload";
 }
 
 export default function LoginPage() {
@@ -66,6 +66,8 @@ export default function LoginPage() {
         throw new Error("Signed in, but no session token came back. Try again.");
       }
       setToken(token);
+      const role = roleFromToken(token);
+      if (role) setUserRole(role);
       toast.success("Signed in.");
       router.push(nextDestination(roleFromToken(token)));
     } catch (err) {

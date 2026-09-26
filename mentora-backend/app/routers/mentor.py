@@ -142,3 +142,132 @@ async def update_mentor_profile(
         mentor_id=str(mentor_object_id),
         profile={**profile, "onboarding_completed": True},
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /mentor/matches  — incoming match requests for the signed-in mentor
+# PATCH /mentor/matches/:match_id  — accept or decline a specific request
+# ---------------------------------------------------------------------------
+
+from datetime import datetime  # noqa: E402 (already imported above via timezone)
+from typing import Optional  # noqa: E402
+
+from fastapi import Query  # noqa: E402
+
+from app.db.mongo import get_matches_collection  # noqa: E402
+
+
+def _mentor_object_id_from_user(user_doc: dict) -> Optional[ObjectId]:
+    """Return the mentors-collection ObjectId linked to this user, or None."""
+    raw = user_doc.get("mentor_id")
+    if not raw:
+        return None
+    try:
+        return ObjectId(str(raw))
+    except (InvalidId, TypeError):
+        return None
+
+
+def _jsonable_match(doc: dict) -> dict:
+    """Serialize a match document so it is JSON-safe."""
+    out = {}
+    for key, value in doc.items():
+        if isinstance(value, ObjectId):
+            out[key] = str(value)
+        elif isinstance(value, datetime):
+            out[key] = value.isoformat()
+        else:
+            out[key] = value
+    return out
+
+
+@router.get("/mentor/matches")
+async def get_mentor_matches(
+    status: Optional[str] = Query(default=None, description="Comma-separated status filter"),
+    user=Depends(get_current_user),
+) -> dict:
+    """Return all match documents where `mentor_id` matches the signed-in mentor.
+
+    Optional ?status=accepted,met filter (comma-separated). Only available to
+    users registered with role "mentor".
+    """
+    if user.get("role") != "mentor":
+        raise HTTPException(status_code=403, detail="Only mentor accounts can view their match requests.")
+
+    user_id = str(user.get("sub", ""))
+    user_doc = _load_user(user_id)
+
+    mentor_object_id = _mentor_object_id_from_user(user_doc)
+    if mentor_object_id is None:
+        return {"matches": []}
+
+    mentor_id_str = str(mentor_object_id)
+    query: dict = {"mentor_id": mentor_id_str}
+
+    if status:
+        statuses = [s.strip() for s in status.split(",") if s.strip()]
+        if statuses:
+            query["status"] = {"$in": statuses}
+
+    try:
+        matches_col = get_matches_collection()
+        docs = list(matches_col.find(query).sort("timestamp", -1))
+    except Exception:
+        logger.exception("Failed to load mentor matches for mentor %s", mentor_id_str)
+        raise HTTPException(status_code=502, detail="Could not load your match requests. Please try again shortly.")
+
+    return {"matches": [_jsonable_match(doc) for doc in docs]}
+
+
+@router.patch("/mentor/matches/{match_id}")
+async def update_mentor_match_status(
+    match_id: str,
+    body: dict,
+    user=Depends(get_current_user),
+) -> dict:
+    """Accept or decline a specific match request.
+
+    Body: { "status": "accepted" | "declined" }
+    Only the mentor linked to that match may update it.
+    """
+    if user.get("role") != "mentor":
+        raise HTTPException(status_code=403, detail="Only mentor accounts can update match requests.")
+
+    new_status = (body.get("status") or "").strip()
+    if new_status not in ("accepted", "declined"):
+        raise HTTPException(status_code=422, detail="status must be 'accepted' or 'declined'.")
+
+    user_id = str(user.get("sub", ""))
+    user_doc = _load_user(user_id)
+    mentor_object_id = _mentor_object_id_from_user(user_doc)
+    mentor_id_str = str(mentor_object_id) if mentor_object_id else None
+
+    try:
+        match_object_id = ObjectId(match_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=404, detail="Match not found.")
+
+    matches_col = get_matches_collection()
+    try:
+        doc = matches_col.find_one({"_id": match_object_id})
+    except Exception:
+        logger.exception("Failed to find match %s", match_id)
+        raise HTTPException(status_code=502, detail="Could not load match. Please try again shortly.")
+
+    if not doc:
+        raise HTTPException(status_code=404, detail="Match not found.")
+
+    # Authorise: only the mentor whose id is on the match may update it.
+    if doc.get("mentor_id") != mentor_id_str:
+        raise HTTPException(status_code=403, detail="You are not the mentor on this match.")
+
+    try:
+        matches_col.update_one(
+            {"_id": match_object_id},
+            {"$set": {"status": new_status, "updated_at": datetime.now(timezone.utc).isoformat()}},
+        )
+    except Exception:
+        logger.exception("Failed to update match %s", match_id)
+        raise HTTPException(status_code=502, detail="Could not update match status. Please try again shortly.")
+
+    return {"success": True, "status": new_status}

@@ -128,7 +128,11 @@ function EmailDialog({ open, onOpenChange, mentor, startupProfile, onSent }) {
       await sendEmail({ to: mentor.email, subject: subject.trim(), body: body.trim() });
     } catch (err) {
       // Network failures already raised the "Server unavailable" toast.
-      if (err.status !== 0) toast.error("Failed to send email. Check your API key.");
+      if (err.status !== 0) {
+        toast.error(err.message || "Failed to send email. Check your Resend API key in .env.local.", {
+          variant: "destructive",
+        });
+      }
       setSending(false);
       return;
     }

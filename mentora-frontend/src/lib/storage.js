@@ -5,6 +5,7 @@
 // writes can notify the rest of the app (see `AUTH_EVENT`).
 
 export const TOKEN_KEY = "token";
+export const USER_ROLE_KEY = "userRole";
 export const STARTUP_PROFILE_KEY = "startupProfile";
 export const MENTOR_MATCHES_KEY = "mentorMatches";
 
@@ -72,10 +73,21 @@ export function clearToken() {
   emitAuthChange();
 }
 
+/** Reads the stored role ("startup" | "mentor") or null. */
+export function getUserRole() {
+  return read(USER_ROLE_KEY);
+}
+
+/** Persists the role so other tabs / page loads know it without decoding the JWT. */
+export function setUserRole(role) {
+  if (role) write(USER_ROLE_KEY, role);
+}
+
 /** Clears the token plus any cached per-user data (used on sign out). */
 export function clearSession() {
   remove(STARTUP_PROFILE_KEY);
   remove(MENTOR_MATCHES_KEY);
+  remove(USER_ROLE_KEY);
   clearToken();
 }
 

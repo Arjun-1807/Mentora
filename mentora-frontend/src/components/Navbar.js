@@ -24,7 +24,7 @@ const STARTUP_LINKS = [
 ];
 
 const MENTOR_LINKS = [
-  { href: "/dashboard", label: "Dashboard" },
+  { href: "/mentor/dashboard", label: "Dashboard" },
   { href: "/onboarding/mentor", label: "My profile" },
 ];
 
