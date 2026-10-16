@@ -9,6 +9,7 @@ export function toStartupProfilePayload(profile) {
     challenges: Array.isArray(profile.challenges) ? profile.challenges : [],
     team_gaps: Array.isArray(profile.team_gaps) ? profile.team_gaps : [],
     geography: profile.geography ?? null,
+    sectors: Array.isArray(profile.sectors) ? profile.sectors : [],
   };
 }
 

@@ -107,6 +107,12 @@ export function validateOnboardingStep(step, data) {
     if ((data.pastExits || "").length > MAX_BIO_LENGTH) {
       errors.pastExits = `Keep this under ${MAX_BIO_LENGTH} characters.`;
     }
+    const skills = parseSkills(data.skills);
+    if (skills.length > MAX_SKILLS) {
+      errors.skills = `List at most ${MAX_SKILLS} skills.`;
+    } else if (skills.some((s) => s.length > MAX_SKILL_LENGTH)) {
+      errors.skills = `Keep each skill under ${MAX_SKILL_LENGTH} characters.`;
+    }
   }
   if (step === 3) {
     if (!Array.isArray(data.preferredStages) || data.preferredStages.length === 0) {
@@ -133,9 +139,29 @@ export function normalizeStages(next, previous = []) {
   return next;
 }
 
+/** Mentor skills limits (mirror the backend's MentorProfileUpdate.skills). */
+export const MAX_SKILLS = 15;
+export const MAX_SKILL_LENGTH = 80;
+
+/** Comma-separated skills text (or an array) → trimmed, de-duplicated list. */
+export function parseSkills(value) {
+  const items = Array.isArray(value) ? value : String(value || "").split(",");
+  const seen = new Set();
+  const skills = [];
+  for (const item of items) {
+    const skill = String(item || "").trim();
+    if (skill && !seen.has(skill.toLowerCase())) {
+      seen.add(skill.toLowerCase());
+      skills.push(skill);
+    }
+  }
+  return skills;
+}
+
 /** Maps onboarding form state to the PATCH /mentor/profile body. */
 export function toMentorProfilePayload(data) {
   return {
+    skills: parseSkills(data.skills),
     name: data.name.trim(),
     linkedin_url: data.linkedinUrl?.trim() || null,
     bio: data.bio?.trim() || null,
