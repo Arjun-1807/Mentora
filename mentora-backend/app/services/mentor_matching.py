@@ -156,8 +156,15 @@ def _run_vector_search(embedding: List[float]) -> List[dict]:
         ) from exc
 
 
-def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
-    """Find and rank the top mentors for a given startup profile."""
+def find_matching_mentors(
+    profile: StartupProfile, exclude_mentor_ids: Optional[Iterable[str]] = None
+) -> List[MentorMatch]:
+    """Find and rank the top mentors for a given startup profile.
+
+    `exclude_mentor_ids` (mentors-collection ids) are dropped before ranking,
+    e.g. mentors the startup already has a match with when picking a
+    replacement suggestion.
+    """
     profile_text = build_startup_profile_text(
         domain=profile.domain,
         stage=profile.stage,
@@ -167,6 +174,9 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
     query_embedding = embed_query(profile_text)
 
     candidates = _run_vector_search(query_embedding)
+    if exclude_mentor_ids:
+        excluded = {str(mentor_id) for mentor_id in exclude_mentor_ids}
+        candidates = [c for c in candidates if str(c.get("_id", "")) not in excluded]
 
     if not candidates:
         return []

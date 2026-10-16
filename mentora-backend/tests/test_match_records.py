@@ -61,17 +61,20 @@ def test_match_records_are_scoped_and_deduplicated(client, fake_mongo, monkeypat
     assert _matches(fake_mongo).count_documents({}) == 5
     assert [item["match_id"] for item in second.json()["matches"]] == match_ids
 
-    # A different profile creates its own records.
+    # A different profile (new deck) refreshes the same (startup, mentor)
+    # pairs instead of creating a second set of records.
     other = {**PROFILE, "domain": "HealthTech"}
-    client.post("/match", json=other, headers=auth_header(token))
-    assert _matches(fake_mongo).count_documents({}) == 10
+    third = client.post("/match", json=other, headers=auth_header(token))
+    assert _matches(fake_mongo).count_documents({}) == 5
+    assert [item["match_id"] for item in third.json()["matches"]] == match_ids
+    assert _matches(fake_mongo).find_one({"match_id": match_ids[0]})["startup_profile"]["domain"] == "HealthTech"
 
 
 def test_match_requires_authentication(client):
     assert client.post("/match", json=PROFILE).status_code == 401
 
 
-def test_email_advances_match_to_emailed(client, fake_mongo, monkeypatch):
+def test_email_only_drafts_and_leaves_status_alone(client, fake_mongo, monkeypatch):
     from app.routers import email as email_router
     from app.routers import match as match_router
 
@@ -86,7 +89,7 @@ def test_email_advances_match_to_emailed(client, fake_mongo, monkeypatch):
     token = register(client, STARTUP_PAYLOAD)
     matches = client.post("/match", json=PROFILE, headers=auth_header(token)).json()["matches"]
     match_id = matches[0]["match_id"]
-    assert _matches(fake_mongo).find_one({"match_id": match_id})["status"] == "pending"
+    assert _matches(fake_mongo).find_one({"match_id": match_id})["status"] == "suggested"
 
     response = client.post(
         "/email",
@@ -95,7 +98,11 @@ def test_email_advances_match_to_emailed(client, fake_mongo, monkeypatch):
     )
     assert response.status_code == 200
     assert response.json()["subject"] == "Hi"
-    assert _matches(fake_mongo).find_one({"match_id": match_id})["status"] == "emailed"
+    assert _matches(fake_mongo).find_one({"match_id": match_id})["status"] == "suggested"
+
+    # Without a profile in the body the active (server-side) profile is used.
+    response = client.post("/email", json={"mentor": matches[0]}, headers=auth_header(token))
+    assert response.status_code == 200
 
 
 def test_email_without_match_id_still_works(client, monkeypatch):

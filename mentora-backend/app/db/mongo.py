@@ -63,6 +63,18 @@ def get_invites_collection() -> Collection:
     return get_database()[settings.MONGODB_INVITES_COLLECTION]
 
 
+def get_startups_collection() -> Collection:
+    return get_database()[settings.MONGODB_STARTUPS_COLLECTION]
+
+
+def get_startup_profiles_collection() -> Collection:
+    return get_database()[settings.MONGODB_STARTUP_PROFILES_COLLECTION]
+
+
+def get_outbox_collection() -> Collection:
+    return get_database()[settings.MONGODB_OUTBOX_COLLECTION]
+
+
 def _safe_create_index(collection: Collection, keys: list, **kwargs) -> None:
     """Create one index, logging (not raising) on failure.
 
@@ -89,8 +101,10 @@ def ensure_indexes() -> None:
                                       /email and /feedback.
     - matches.user_id              -> per-user match listing (/matches/all).
     - matches.mentor_id            -> mentor-side match listing.
-    - matches (user_id, mentor_id, profile_fingerprint) unique (partial)
-                                   -> de-duplicates repeated /match calls.
+    - matches (startup_id, mentor_id) unique, partial on active: true
+                                   -> one live match per startup/mentor pair;
+                                      a new deck refreshes it (services/matches.py).
+    - matches (startup_id, status) -> per-startup listings / supersede / expiry.
     - feedback.match_id     unique -> one feedback per match (idempotency).
     - feedback.mentor_id           -> effectiveness_score aggregation.
     - oauth_states.state    unique -> one-time Google OAuth state tokens.
@@ -103,6 +117,13 @@ def ensure_indexes() -> None:
     - invites.token_hash    unique -> invite lookup by sha256(token).
     - invites (cohort_id, created_at) -> coordinator invite listing.
     - users.cohort_ids             -> coordinator cohort scoping.
+    - startups.owner_user_id unique -> one startup per owning user.
+    - startup_profiles (startup_id, version) unique -> versioned profiles.
+    - outbox.created_at            -> recent outgoing mail (log delivery).
+
+    The pre-lifecycle unique index `uniq_user_mentor_profile` (user_id,
+    mentor_id, profile_fingerprint) is no longer created; scripts/migrate_v2.py
+    drops it after de-duplicating pairs.
     """
     users = get_users_collection()
     matches = get_matches_collection()
@@ -117,13 +138,14 @@ def ensure_indexes() -> None:
     _safe_create_index(matches, [("mentor_id", ASCENDING)], name="mentor_id")
     _safe_create_index(
         matches,
-        [("user_id", ASCENDING), ("mentor_id", ASCENDING), ("profile_fingerprint", ASCENDING)],
+        [("startup_id", ASCENDING), ("mentor_id", ASCENDING)],
         unique=True,
-        name="uniq_user_mentor_profile",
-        # Legacy match documents predate these fields; exclude them so the
-        # unique index can be built on an existing collection.
-        partialFilterExpression={"user_id": {"$exists": True}},
+        name="uniq_active_startup_mentor",
+        # Only the live record of a pair is unique; superseded / terminal /
+        # de-duplicated history documents are kept alongside it.
+        partialFilterExpression={"active": True},
     )
+    _safe_create_index(matches, [("startup_id", ASCENDING), ("status", ASCENDING)], name="startup_id_status")
 
     _safe_create_index(feedback, [("match_id", ASCENDING)], unique=True, name="uniq_match_id")
     _safe_create_index(feedback, [("mentor_id", ASCENDING)], name="mentor_id")
@@ -161,7 +183,18 @@ def ensure_indexes() -> None:
         invites, [("cohort_id", ASCENDING), ("created_at", DESCENDING)], name="cohort_id_created_at"
     )
 
+    _safe_create_index(
+        get_startups_collection(), [("owner_user_id", ASCENDING)], unique=True, name="uniq_owner_user_id"
+    )
+    _safe_create_index(
+        get_startup_profiles_collection(),
+        [("startup_id", ASCENDING), ("version", ASCENDING)],
+        unique=True,
+        name="uniq_startup_version",
+    )
+    _safe_create_index(get_outbox_collection(), [("created_at", DESCENDING)], name="created_at")
+
     logger.info(
         "MongoDB index creation attempted for users/matches/feedback/oauth_states/meeting_notes/"
-        "organizations/cohorts/invites"
+        "organizations/cohorts/invites/startups/startup_profiles/outbox"
     )

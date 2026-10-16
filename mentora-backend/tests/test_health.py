@@ -239,6 +239,7 @@ def test_cohort_lists_startups_with_activity(client, fake_mongo, setup):
     assert second == {
         "user_id": second["user_id"],
         "email": OTHER_STARTUP["email"],
+        "company_name": None,
         "domain": None,
         "stage": None,
         "health_score": None,

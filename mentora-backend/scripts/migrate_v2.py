@@ -10,7 +10,15 @@ What it does (each step only touches documents that still need it):
      coordinators are recorded on the legacy cohort's coordinator_user_ids;
   4. mentors get default `visibility` {scope: global, org_ids: []},
      `listed: true` and `active: true` where missing;
-  5. (real runs only) creates the new indexes via ensure_indexes().
+  5. (Phase 2) match statuses pending/emailed -> suggested and
+     email_sent -> requested;
+  6. every startup user gets a `startups` doc and, from their newest match's
+     profile snapshot, a version-1 `startup_profiles` doc;
+  7. matches are adopted onto (startup_id, mentor_id) pairs, keeping the most
+     advanced document per pair live and marking the rest `duplicate_of`;
+  8. the old `uniq_user_mentor_profile` index is dropped;
+  9. (real runs only) creates the new indexes via ensure_indexes() - after
+     the de-duplication, so the partial unique pair index can be built.
 
 Take a backup first:   mongodump --uri "$MONGODB_URI" --db <name> --out ./backup
 Preview (read-only):   python scripts/migrate_v2.py --db mentora --dry-run
@@ -121,7 +129,95 @@ def migrate(db, *, dry_run: bool = True, keep_coordinators: Optional[Iterable[st
         if not dry_run:
             mentors.update_many(query, {"$set": {field: value}})
 
+    _migrate_lifecycle(db, report, dry_run=dry_run, org_id=org_id, cohort_id=cohort_id)
     return report
+
+
+def _migrate_lifecycle(db, report: Dict[str, Any], *, dry_run: bool, org_id: str, cohort_id: str) -> None:
+    """Phase 2: match lifecycle + server-side startups.
+
+    5. legacy statuses: pending / emailed -> suggested, email_sent -> requested
+       (requested_at backfilled from email_sent_at / status_updated_at);
+    6. every startup user gets a `startups` doc, plus a version-1
+       `startup_profiles` doc (source "migration") from their newest match's
+       startup_profile snapshot;
+    7. their matches are adopted: startup_id / org_id / cohort_id stamped,
+       one live doc per (startup, mentor) kept (the most advanced), the rest
+       `active: false` + `duplicate_of`;
+    8. the old unique index `uniq_user_mentor_profile` is dropped (the new
+       partial unique index is built by ensure_indexes() after this).
+    """
+    from app.config import settings
+    from app.services import startups as startup_service
+    from app.services.matches import LEGACY_STATUS_MAP, adopt_legacy_matches
+
+    users = db[settings.MONGODB_USERS_COLLECTION]
+    matches = db[settings.MONGODB_MATCHES_COLLECTION]
+    startups = db[settings.MONGODB_STARTUPS_COLLECTION]
+
+    # 5. status vocabulary
+    report["matches_total"] = matches.count_documents({})
+    for legacy, new in LEGACY_STATUS_MAP.items():
+        query = {"status": legacy}
+        report[f"matches_status_{legacy}_to_{new}"] = matches.count_documents(query)
+        if dry_run:
+            continue
+        if new == "requested":
+            for doc in matches.find(query, {"email_sent_at": 1, "status_updated_at": 1, "timestamp": 1, "requested_at": 1}):
+                requested_at = (
+                    doc.get("requested_at") or doc.get("email_sent_at") or doc.get("status_updated_at") or doc.get("timestamp")
+                )
+                matches.update_one({"_id": doc["_id"], "status": legacy}, {"$set": {"status": new, "requested_at": requested_at}})
+        else:
+            matches.update_many(query, {"$set": {"status": new}})
+
+    # 6 + 7. startups, profiles, match adoption
+    created = profiles_created = 0
+    totals = {"adopted": 0, "duplicates": 0}
+    for user in users.find({"role": "startup"}, {"password_hash": 0}):
+        user_id = str(user["_id"])
+        startup = startups.find_one({"owner_user_id": user_id})
+        if startup is None:
+            created += 1
+            if startup_service.latest_legacy_profile(user_id, db) is not None:
+                profiles_created += 1
+            if dry_run:
+                counts = adopt_legacy_matches(user_id, "<new startup>", matches=matches, dry_run=True)
+            else:
+                if not user.get("org_id"):
+                    user = {**user, "org_id": org_id, "cohort_id": cohort_id}
+                startup = startup_service.ensure_startup(user, db=db)  # also adopts the matches
+                counts = _adoption_after_create(matches, str(startup["_id"]))
+        else:
+            counts = adopt_legacy_matches(
+                user_id,
+                str(startup["_id"]),
+                org_id=startup.get("org_id"),
+                cohort_id=startup.get("cohort_id"),
+                profile_id=str(startup["active_profile_id"]) if startup.get("active_profile_id") else None,
+                matches=matches,
+                dry_run=dry_run,
+            )
+        for key in totals:
+            totals[key] += int(counts.get(key) or 0)
+    report["startups_created"] = created
+    report["startup_profiles_created"] = profiles_created
+    report["matches_adopted"] = totals["adopted"]
+    report["matches_deduplicated"] = totals["duplicates"]
+
+    # 8. old index
+    has_old_index = "uniq_user_mentor_profile" in matches.index_information()
+    report["old_index_dropped"] = int(has_old_index)
+    if has_old_index and not dry_run:
+        matches.drop_index("uniq_user_mentor_profile")
+
+
+def _adoption_after_create(matches, startup_id: str) -> Dict[str, int]:
+    """What ensure_startup() just adopted for a new startup (for the report)."""
+    return {
+        "adopted": matches.count_documents({"startup_id": startup_id}),
+        "duplicates": matches.count_documents({"startup_id": startup_id, "duplicate_of": {"$exists": True}}),
+    }
 
 
 def _changes(report: Dict[str, Any]) -> int:
@@ -134,6 +230,14 @@ def _changes(report: Dict[str, Any]) -> int:
         "mentors_visibility_backfilled",
         "mentors_listed_backfilled",
         "mentors_active_backfilled",
+        "matches_status_pending_to_suggested",
+        "matches_status_emailed_to_suggested",
+        "matches_status_email_sent_to_requested",
+        "startups_created",
+        "startup_profiles_created",
+        "matches_adopted",
+        "matches_deduplicated",
+        "old_index_dropped",
     )
     created = sum(1 for key in ("legacy_org", "default_cohort") if report.get(key) != "exists")
     return created + sum(int(report.get(key) or 0) for key in keys)

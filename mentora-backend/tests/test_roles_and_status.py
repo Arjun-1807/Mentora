@@ -59,7 +59,7 @@ def test_me_reports_calendar_connected(client, fake_mongo):
 
 def test_status_order_matches_contract():
     assert MATCH_STATUS_ORDER == [
-        "pending", "emailed", "email_sent", "accepted", "meeting_scheduled", "completed"
+        "suggested", "requested", "accepted", "meeting_scheduled", "met", "completed"
     ]
 
 
@@ -89,30 +89,34 @@ def _feedback(client, token, match):
     )
 
 
-def test_feedback_completes_accepted_and_scheduled_matches(client, fake_mongo):
+def test_feedback_completes_scheduled_and_met_matches(client, fake_mongo):
     token = register(client, STARTUP_PAYLOAD)
     user_id = me(client, token)["user_id"]
     mentor_id = seed_mentor(fake_mongo)
-    for status in ("accepted", "meeting_scheduled"):
+    for status in ("meeting_scheduled", "met"):
         match = insert_match(fake_mongo, user_id=user_id, mentor_id=mentor_id, status=status)
         response = _feedback(client, token, match)
         assert response.status_code == 200, response.text
-        assert db(fake_mongo)["matches"].find_one({"match_id": match["match_id"]})["status"] == "completed"
+        doc = db(fake_mongo)["matches"].find_one({"match_id": match["match_id"]})
+        assert doc["status"] == "completed"
+        assert doc["history"][-1]["to"] == "completed"
 
 
-def test_feedback_does_not_resurrect_a_declined_match(client, fake_mongo):
+def test_feedback_needs_a_meeting(client, fake_mongo):
     token = register(client, STARTUP_PAYLOAD)
     user_id = me(client, token)["user_id"]
     mentor_id = seed_mentor(fake_mongo)
-    match = insert_match(fake_mongo, user_id=user_id, mentor_id=mentor_id, status="declined")
-    assert _feedback(client, token, match).status_code == 200
-    assert db(fake_mongo)["matches"].find_one({"match_id": match["match_id"]})["status"] == "declined"
+    for status in ("pending", "suggested", "requested", "accepted", "declined", "withdrawn"):
+        match = insert_match(fake_mongo, user_id=user_id, mentor_id=mentor_id, status=status)
+        assert _feedback(client, token, match).status_code == 409, status
+        assert db(fake_mongo)["matches"].find_one({"match_id": match["match_id"]})["status"] == status
+    assert db(fake_mongo)["feedback"].count_documents({}) == 0
 
 
 def test_mentor_accept_and_decline_still_work(client, fake_mongo):
     mentor_token = register(client, MENTOR_PAYLOAD)
     mentor_id = me(client, mentor_token)["mentor_id"]
-    match = insert_match(fake_mongo, user_id="507f1f77bcf86cd799439011", mentor_id=mentor_id)
+    match = insert_match(fake_mongo, user_id="507f1f77bcf86cd799439011", mentor_id=mentor_id, status="requested")
     response = client.patch(
         f"/mentor/matches/{match['_id']}", json={"status": "accepted"}, headers=auth_header(mentor_token)
     )
@@ -168,17 +172,27 @@ def test_mentor_matches_include_startup_email_and_mentor_name(client, fake_mongo
     startup_id = me(client, startup_token)["user_id"]
     mentor_token = register(client, MENTOR_PAYLOAD)
     mentor_id = me(client, mentor_token)["mentor_id"]
-    insert_match(fake_mongo, user_id=startup_id, mentor_id=mentor_id, status="email_sent")
+    from datetime import datetime, timezone
+
+    fresh = datetime.now(timezone.utc).isoformat()  # not yet expired
+    insert_match(fake_mongo, user_id=startup_id, mentor_id=mentor_id, status="email_sent", requested_at=fresh)
     insert_match(fake_mongo, user_id=startup_id, mentor_id=mentor_id, status="accepted")
 
+    # Legacy spellings still filter (email_sent == requested).
     response = client.get(
         "/mentor/matches", params={"status": "pending,emailed,email_sent"}, headers=auth_header(mentor_token)
     )
     assert response.status_code == 200
     docs = response.json()["matches"]
     assert len(docs) == 1
-    assert docs[0]["startup_email"] == STARTUP_PAYLOAD["email"]
+    assert docs[0]["status"] == "requested"
+    assert docs[0]["startup_email"] is None  # not before the mentor accepts
     assert docs[0]["mentor_name"] == MENTOR_PAYLOAD["profile"]["name"]
+
+    accepted = client.get(
+        "/mentor/matches", params={"status": "accepted"}, headers=auth_header(mentor_token)
+    ).json()["matches"]
+    assert [d["startup_email"] for d in accepted] == [STARTUP_PAYLOAD["email"]]
 
 
 # --- structured error pass-through --------------------------------------------------
