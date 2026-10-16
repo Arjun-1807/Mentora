@@ -50,6 +50,13 @@ def no_embedding_model(monkeypatch):
     monkeypatch.setattr(auth_router, "embed_passage", fake_embedding)
     monkeypatch.setattr(mentor_router, "embed_passage", fake_embedding)
     monkeypatch.setattr(mentor_matching, "embed_query", fake_embedding)
+    # Batch helpers used for need-fit / skill embeddings.
+    fake_batch = lambda texts: [fake_embedding(text) for text in texts]  # noqa: E731
+    monkeypatch.setattr(embeddings, "embed_queries", fake_batch)
+    monkeypatch.setattr(embeddings, "embed_passages", fake_batch)
+    monkeypatch.setattr(mentor_matching, "embed_queries", fake_batch)
+    monkeypatch.setattr(mentor_matching, "embed_passages", fake_batch)
+    monkeypatch.setattr(mentor_router, "embed_passages", fake_batch)
 
 
 @pytest.fixture(autouse=True)

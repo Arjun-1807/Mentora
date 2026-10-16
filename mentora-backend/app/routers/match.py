@@ -137,7 +137,7 @@ async def list_mentors(
     if stage_focus:
         query["stage_focus"] = {"$regex": f"^{stage_focus.strip()}$", "$options": "i"}
 
-    projection = {"embedding": 0}
+    projection = {"embedding": 0, "skill_embeddings": 0}
 
     try:
         collection = get_mentors_collection()

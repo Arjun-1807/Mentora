@@ -174,11 +174,12 @@ def _print_table(result: dict, stored: dict) -> None:
         columns.append((name, run["metrics"]))
     columns.append(("current", result["metrics"]))
 
-    header = f"{'metric':12s}" + "".join(f"{name:>16s}" for name, _ in columns)
+    width = max([16] + [len(name) + 2 for name, _ in columns])
+    header = f"{'metric':12s}" + "".join(f"{name:>{width}s}" for name, _ in columns)
     print(header)
     print("-" * len(header))
     for metric in METRICS:
-        print(f"{metric:12s}" + "".join(f"{values.get(metric, float('nan')):>16.4f}" for _, values in columns))
+        print(f"{metric:12s}" + "".join(f"{values.get(metric, float('nan')):>{width}.4f}" for _, values in columns))
 
 
 def main() -> int:

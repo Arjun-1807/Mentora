@@ -51,6 +51,9 @@ MentorAvailability = Literal["Weekdays", "Weekends", "Flexible"]
 
 MAX_BIO_LENGTH = 300
 MAX_PAST_EXITS_LENGTH = 300
+# Phase 4 (matching quality): mentor skills limits.
+MAX_MENTOR_SKILLS = 15
+MAX_MENTOR_SKILL_LENGTH = 80
 
 # Minimum password length enforced at registration.
 MIN_PASSWORD_LENGTH = 8
@@ -156,6 +159,11 @@ class MentorMatch(BaseModel):
     geography: Optional[str] = None
     similarity: Optional[float] = Field(
         default=None, description="Raw vector-search cosine similarity, clamped to [0, 1]"
+    )
+    # Phase 4 (matching quality): explanation of the match.
+    reasons: List[str] = Field(
+        default_factory=list,
+        description="Best 'startup need → mentor skill' pairs behind the match, best first (may be empty)",
     )
 
 
@@ -288,6 +296,9 @@ class MentorProfileUpdate(BaseModel):
     preferred_stages: List[MentorStage] = Field(..., min_length=1)
     max_startups_per_month: MaxStartupsPerMonth
     availability: MentorAvailability
+    # Phase 4 (matching quality): functional skills matched against startup
+    # challenges / team gaps. Optional so older clients keep working.
+    skills: List[str] = Field(default_factory=list, max_length=MAX_MENTOR_SKILLS)
 
     @field_validator("name")
     @classmethod
@@ -296,6 +307,15 @@ class MentorProfileUpdate(BaseModel):
         if not value:
             raise ValueError("name must not be blank")
         return value
+
+    @field_validator("skills", mode="before")
+    @classmethod
+    def _clean_skills(cls, value: Any) -> List[str]:
+        cleaned = _clean_str_list(value)
+        for skill in cleaned:
+            if len(skill) > MAX_MENTOR_SKILL_LENGTH:
+                raise ValueError(f"each skill must be at most {MAX_MENTOR_SKILL_LENGTH} characters")
+        return cleaned
 
     @field_validator("linkedin_url", "bio", "past_exits")
     @classmethod

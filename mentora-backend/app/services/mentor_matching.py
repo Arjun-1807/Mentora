@@ -5,43 +5,38 @@ similarity with several weighted match factors.
 
 Score convention: match_score is a float in the 0-1 range, computed as
 
-    final_score = cosine_score * 0.5
-                + stage_match * 0.2
-                + domain_match * 0.15
-                + geography_match * 0.05
-                + effectiveness_score_normalized * 0.10
+    final_score = similarity     * SIMILARITY_WEIGHT
+                + need_fit       * NEED_FIT_WEIGHT
+                + domain_match   * DOMAIN_MATCH_WEIGHT
+                + stage_match    * STAGE_MATCH_WEIGHT
+                + geography      * GEOGRAPHY_MATCH_WEIGHT
+                + effectiveness  * EFFECTIVENESS_WEIGHT
 
-where:
-  - cosine_score is the raw $vectorSearch score, clamped to [0, 1].
-  - stage_match is 1.0 if mentor.stage_focus == startup.stage, or the
-    startup's stage is in mentor.preferred_stages, or the mentor covers
-    "all" stages (all case-insensitive), else 0.0.
-  - domain_match is 1.0 if mentor.domain and startup.domain name the same
-    domain after `canonical_domain()` (case/spacing-insensitive, with known
-    synonyms folded together, e.g. "Climate Tech" == "Clean Energy"), else 0.0.
-  - geography_match is 1.0 if mentor.geography == startup.geography (case-insensitive,
-    both present), else 0.0.
-  - effectiveness_score_normalized = (mentor.effectiveness_score or 0.0) / 5.0
-    (mentors with no feedback yet contribute 0 here).
+(see the module constants below and README "Scoring / matching details").
 """
 import logging
-from typing import Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+import numpy as np
 from fastapi import HTTPException
 
 from app.config import settings
 from app.db.mongo import get_mentors_collection
 from app.models.schemas import MentorMatch, StartupProfile
-from app.services.embeddings import build_startup_profile_text, embed_query
+from app.services.embeddings import build_startup_profile_text, embed_passages, embed_queries, embed_query
 
 logger = logging.getLogger(__name__)
 
-# --- Weighted-scoring formula weights --------------------------------------
-COSINE_WEIGHT = 0.5
-STAGE_MATCH_WEIGHT = 0.2
+# --- Weighted-scoring formula weights (sum to 1.0) --------------------------
+SIMILARITY_WEIGHT = 0.35
+NEED_FIT_WEIGHT = 0.22
 DOMAIN_MATCH_WEIGHT = 0.15
+STAGE_MATCH_WEIGHT = 0.12
 GEOGRAPHY_MATCH_WEIGHT = 0.05
-EFFECTIVENESS_WEIGHT = 0.10
+EFFECTIVENESS_WEIGHT = 0.11
+# Backward-compatible alias (the profile-level similarity used to be called
+# the cosine term).
+COSINE_WEIGHT = SIMILARITY_WEIGHT
 # ---------------------------------------------------------------------------
 
 # --- Similarity calibration -------------------------------------------------
@@ -49,21 +44,33 @@ EFFECTIVENESS_WEIGHT = 0.10
 # raw score of every candidate sits in a narrow ~0.75-0.90 band. We undo
 # that mapping (cos = 2s - 1) and stretch the band that BGE cosines actually
 # occupy onto [0, 1]. Both constants were fitted on the eval set
-# (tests/fixtures/eval_set.json, 32 profiles x 17 staging mentors):
-# COS_FLOOR ~ 5th percentile of all candidate cosines, COS_CEIL ~ the best
-# cosine seen. Re-fit them (scripts/eval_matching.py) if the embedding model
-# or the profile text templates change.
-COS_FLOOR = 0.54
-COS_CEIL = 0.82
+# (tests/fixtures/eval_set.json, 32 profiles x 17 staging mentors, mentor
+# embeddings including skills): COS_FLOOR ~ 5th percentile of all candidate
+# cosines (0.534), COS_CEIL ~ the best cosine seen (0.836). Re-fit them
+# (scripts/eval_matching.py --set COS_FLOOR=...) if the embedding model or
+# the profile text templates change.
+COS_FLOOR = 0.53
+COS_CEIL = 0.84
 # ---------------------------------------------------------------------------
 
-
-def calibrate_similarity(vector_search_score: float) -> float:
-    """Map an Atlas cosine vectorSearchScore onto a 0-1 similarity that
-    actually spreads candidates apart (see COS_FLOOR / COS_CEIL)."""
-    cosine = 2.0 * float(vector_search_score) - 1.0
-    return max(0.0, min(1.0, (cosine - COS_FLOOR) / (COS_CEIL - COS_FLOOR)))
-
+# --- Need fit (startup challenges / team gaps vs mentor skills) --------------
+# Per-pair cosines between a query-embedded need and a passage-embedded skill
+# are short-text cosines with their own range, so they get their own
+# constants, fitted on the eval set (32 profiles x 15 seeded mentors): the
+# 5th and 99th percentile of each need's best-skill cosine.
+SKILL_COS_FLOOR = 0.34
+SKILL_COS_CEIL = 0.75
+# need_fit of a mentor without any skills (nothing to compare against): a
+# neutral prior at the eval-set median calibrated need_fit (~0.32), so legacy
+# accounts that never filled in skills are neither boosted nor buried.
+NEED_FIT_UNKNOWN = 0.3
+# At most this many startup needs are compared (long LLM lists add noise).
+MAX_NEEDS = 12
+# `reasons` lists up to MAX_REASONS need -> skill pairs whose calibrated
+# similarity is at least REASON_MIN_SIMILARITY.
+MAX_REASONS = 3
+REASON_MIN_SIMILARITY = 0.5
+# ---------------------------------------------------------------------------
 
 # How many raw candidates to pull from vector search before re-ranking.
 VECTOR_SEARCH_CANDIDATE_LIMIT = 20
@@ -98,6 +105,18 @@ def canonical_domain(domain: Optional[str]) -> str:
     return _DOMAIN_SYNONYMS.get(key, raw)
 
 
+def calibrate_similarity(vector_search_score: float) -> float:
+    """Map an Atlas cosine vectorSearchScore onto a 0-1 similarity that
+    actually spreads candidates apart (see COS_FLOOR / COS_CEIL)."""
+    cosine = 2.0 * float(vector_search_score) - 1.0
+    return max(0.0, min(1.0, (cosine - COS_FLOOR) / (COS_CEIL - COS_FLOOR)))
+
+
+def calibrate_skill_similarity(cosine):
+    """Calibrate need-to-skill cosine(s) (float or numpy array) onto [0, 1]."""
+    return np.clip((np.asarray(cosine, dtype=float) - SKILL_COS_FLOOR) / (SKILL_COS_CEIL - SKILL_COS_FLOOR), 0.0, 1.0)
+
+
 def _stage_matches(profile_stage: str, stage_focus: Optional[str], preferred_stages: Optional[Iterable]) -> bool:
     """True if a mentor with this stage_focus / preferred_stages covers profile_stage."""
     stages = {(stage_focus or "").strip().lower()}
@@ -107,6 +126,97 @@ def _stage_matches(profile_stage: str, stage_focus: Optional[str], preferred_sta
     if not stages:
         return False
     return ALL_STAGES in stages or (bool(profile_stage) and profile_stage in stages)
+
+
+# --- need fit -------------------------------------------------------------------
+
+def startup_needs(profile: StartupProfile) -> List[str]:
+    """The startup's challenges followed by its team gaps (stripped,
+    de-duplicated, capped at MAX_NEEDS)."""
+    needs: List[str] = []
+    seen = set()
+    for item in list(profile.challenges or []) + list(profile.team_gaps or []):
+        text = str(item or "").strip()
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            needs.append(text)
+    return needs[:MAX_NEEDS]
+
+
+def mentor_skills(candidate: Dict[str, Any]) -> List[str]:
+    """A mentor's skills; legacy documents without `skills` fall back to
+    their `expertise` entries that are not just sector names (onboarding
+    used to overwrite expertise with the sector list)."""
+    skills = [str(s).strip() for s in (candidate.get("skills") or []) if str(s or "").strip()]
+    if skills:
+        return skills
+    sectors = {canonical_domain(s) for s in (candidate.get("sector_expertise") or [])}
+    sectors.add(canonical_domain(candidate.get("domain")))
+    return [
+        str(e).strip()
+        for e in (candidate.get("expertise") or [])
+        if str(e or "").strip() and canonical_domain(str(e)) not in sectors and canonical_domain(str(e)) not in _DOMAIN_SYNONYMS.values()
+    ]
+
+
+def _skill_matrices(candidates: Sequence[Dict[str, Any]]) -> List[Optional[np.ndarray]]:
+    """Per candidate, a (skills x dim) matrix of normalised skill embeddings
+    (None if the mentor has no skills). Stored `skill_embeddings` are used
+    when they line up with the skills; anything missing is embedded in one
+    batch call."""
+    matrices: List[Optional[np.ndarray]] = [None] * len(candidates)
+    missing: List[Tuple[int, List[str]]] = []
+    for index, candidate in enumerate(candidates):
+        skills = mentor_skills(candidate)
+        if not skills:
+            continue
+        stored = candidate.get("skill_embeddings")
+        if candidate.get("skills") and isinstance(stored, list) and len(stored) == len(skills) and stored:
+            matrices[index] = np.asarray(stored, dtype=float)
+        else:
+            missing.append((index, skills))
+    if missing:
+        flat = [skill for _, skills in missing for skill in skills]
+        vectors = embed_passages(flat)
+        offset = 0
+        for index, skills in missing:
+            matrices[index] = np.asarray(vectors[offset: offset + len(skills)], dtype=float)
+            offset += len(skills)
+    return matrices
+
+
+def compute_need_fit(
+    needs: Sequence[str],
+    need_vectors: Optional[np.ndarray],
+    skills: Sequence[str],
+    skill_matrix: Optional[np.ndarray],
+) -> Tuple[float, List[str]]:
+    """need_fit = mean over needs of the best calibrated similarity to any
+    of the mentor's skills; plus the best need -> skill pairs as reasons.
+
+    Returns (NEED_FIT_UNKNOWN, []) for a mentor without skills and
+    (0.0, []) for a startup without needs.
+    """
+    if not needs or need_vectors is None or len(need_vectors) == 0:
+        return 0.0, []
+    if not skills or skill_matrix is None or len(skill_matrix) == 0:
+        return NEED_FIT_UNKNOWN, []
+    similarity = calibrate_skill_similarity(need_vectors @ skill_matrix.T)  # needs x skills
+    best_skill = similarity.argmax(axis=1)
+    best = similarity.max(axis=1)
+    need_fit = float(best.mean())
+
+    reasons: List[str] = []
+    used_skills = set()
+    for need_index in np.argsort(-best, kind="stable"):
+        if len(reasons) >= MAX_REASONS or best[need_index] < REASON_MIN_SIMILARITY:
+            break
+        skill_index = int(best_skill[need_index])
+        if skill_index in used_skills:
+            continue
+        used_skills.add(skill_index)
+        reasons.append(f"{needs[int(need_index)]} → {skills[skill_index]}")
+    return need_fit, reasons
 
 
 NO_MENTORS_MESSAGE = "No mentor profiles found. Please seed the database."
@@ -149,8 +259,11 @@ def _run_vector_search(embedding: List[float]) -> List[dict]:
                 "_id": 1,
                 "name": 1,
                 "domain": 1,
+                "sector_expertise": 1,
                 "stage_focus": 1,
                 "expertise": 1,
+                "skills": 1,
+                "skill_embeddings": 1,
                 "geography": 1,
                 "email": 1,
                 "preferred_stages": 1,
@@ -192,14 +305,19 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
     if not candidates:
         return []
 
+    needs = startup_needs(profile)
+    need_vectors = np.asarray(embed_queries(needs), dtype=float) if needs else None
+    skill_matrices = _skill_matrices(candidates)
+
     profile_domain = canonical_domain(profile.domain)
     profile_stage = (profile.stage or "").strip().lower()
     profile_geography = (profile.geography or "").strip().lower()
 
     ranked: List[MentorMatch] = []
-    for candidate in candidates:
+    for candidate, skill_matrix in zip(candidates, skill_matrices):
         raw_score = max(0.0, min(1.0, float(candidate.get("score", 0.0))))
-        cosine_score = calibrate_similarity(raw_score)
+        similarity = calibrate_similarity(raw_score)
+        need_fit, reasons = compute_need_fit(needs, need_vectors, mentor_skills(candidate), skill_matrix)
 
         candidate_domain = canonical_domain(candidate.get("domain"))
         candidate_geography = (candidate.get("geography") or "").strip().lower()
@@ -217,7 +335,8 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
         effectiveness_score_normalized = (candidate_effectiveness or 0.0) / 5.0
 
         final_score = (
-            cosine_score * COSINE_WEIGHT
+            similarity * SIMILARITY_WEIGHT
+            + need_fit * NEED_FIT_WEIGHT
             + stage_match * STAGE_MATCH_WEIGHT
             + domain_match * DOMAIN_MATCH_WEIGHT
             + geography_match * GEOGRAPHY_MATCH_WEIGHT
@@ -236,6 +355,7 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
                 email=candidate.get("email"),
                 geography=candidate.get("geography"),
                 similarity=round(raw_score, 4),
+                reasons=reasons,
             )
         )
 
