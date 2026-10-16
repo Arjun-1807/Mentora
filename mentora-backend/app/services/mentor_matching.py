@@ -3,16 +3,47 @@ Mentor matching: queries MongoDB Atlas Vector Search for mentors whose
 embeddings are closest to the startup profile embedding, then combines
 similarity with several weighted match factors.
 
+Pipeline:
+  1. $vectorSearch over mentor profile embeddings, pre-filtered to mentors
+     that are not `listed: false` / `active: false` (VECTOR_SEARCH_FILTER).
+  2. Eligibility: drop mentors with `onboarding_completed: false` (legacy and
+     seeded documents without the flag stay), then the capacity rule (see
+     apply_eligibility / CAPACITY_*).
+  3. Re-rank with the weighted formula and return the top TOP_K_RESULTS.
+
 Score convention: match_score is a float in the 0-1 range, computed as
 
-    final_score = similarity     * SIMILARITY_WEIGHT
-                + need_fit       * NEED_FIT_WEIGHT
-                + domain_match   * DOMAIN_MATCH_WEIGHT
-                + stage_match    * STAGE_MATCH_WEIGHT
-                + geography      * GEOGRAPHY_MATCH_WEIGHT
-                + effectiveness  * EFFECTIVENESS_WEIGHT
+    final_score = 0.35 * similarity
+                + 0.22 * need_fit
+                + 0.15 * domain_match
+                + 0.12 * stage_match
+                + 0.05 * geography_match
+                + 0.11 * effectiveness
+    (x CAPACITY_PENALTY = 0.5 for an at-capacity mentor kept by the fallback)
 
-(see the module constants below and README "Scoring / matching details").
+where every term is in [0, 1]:
+  - similarity: the Atlas vectorSearchScore s turned back into a cosine
+    (cos = 2s - 1) and stretched with COS_FLOOR / COS_CEIL
+    (calibrate_similarity).
+  - need_fit: mean over the startup's challenges + team gaps of the best
+    calibrated cosine to any of the mentor's `skills` (query-embedded needs
+    vs stored passage-embedded `skill_embeddings`); NEED_FIT_UNKNOWN for a
+    mentor without skills. The best pairs are returned as MentorMatch.reasons.
+  - domain_match: 1.0 if any of the startup's `sectors` (or its `domain`)
+    overlaps any of the mentor's `sector_expertise` / `domain` after
+    canonical_domain() maps both onto the MentorSector vocabulary ("Others"
+    never matches).
+  - stage_match: 1.0 if mentor.stage_focus / preferred_stages cover the
+    startup's stage (or "all").
+  - geography_match: 1.0 same city after normalise_geography() aliases
+    ("Bengaluru" == "Bangalore, India"), 0.5 if either side is Remote, else 0.
+  - effectiveness: Bayesian average of attended ratings,
+    (3 * 3.5 + sum) / (3 + n), mapped from 1-5 onto 0-1, so a new mentor
+    scores a neutral 0.625.
+
+The weights are the module constants below (they sum to 1.0); see README
+"Scoring / matching details" and scripts/eval_matching.py for how each
+change was measured.
 """
 import logging
 from datetime import datetime, timedelta, timezone

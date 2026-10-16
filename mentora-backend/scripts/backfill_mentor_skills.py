@@ -2,8 +2,8 @@
 Backfill mentor `skills` + `skill_embeddings` and re-embed every mentor's
 profile `embedding` in place (no deletes, unlike seed_mentors.py).
 
-  * Seeded mentors (matched by their seed email) get the `skills` list from
-    seed_mentors.py.
+  * Seeded mentors (matched by their seed email, or by name for a `seeded`
+    document whose email changed) get the `skills` list from seed_mentors.py.
   * Every other mentor keeps the `skills` it already has (set through
     PATCH /mentor/profile); mentors without skills only get re-embedded.
   * `skill_embeddings` (one passage embedding per skill) is recomputed for
@@ -40,13 +40,28 @@ def _seed_by_email() -> dict:
     return {mentor["email"].lower(): mentor for mentor in MENTORS}
 
 
-def planned_update(doc: dict, seeds: dict) -> dict:
-    """The $set for one mentor document."""
+def _seed_for(doc: dict, seeds: dict):
+    """The seed entry of a seeded mentor: by email, or by name for a
+    `seeded` document whose email was changed (e.g. claimed by a demo login)."""
     seed = seeds.get((doc.get("email") or "").strip().lower())
-    if seed is not None and not doc.get("user_id"):
+    if seed is None and doc.get("seeded"):
+        seed = next((m for m in seeds.values() if m["name"] == doc.get("name")), None)
+    return seed
+
+
+def planned_update(doc: dict, seeds: dict) -> dict:
+    """The $set for one mentor document.
+
+    Unclaimed seeded mentors always take the seed skills; any other mentor
+    keeps the skills it has, and a claimed seeded mentor without skills
+    falls back to its seed skills.
+    """
+    seed = _seed_for(doc, seeds)
+    existing = [str(s).strip() for s in (doc.get("skills") or []) if str(s).strip()]
+    if seed is not None and (not doc.get("user_id") or not existing):
         skills = list(seed["skills"])
     else:
-        skills = [str(s).strip() for s in (doc.get("skills") or []) if str(s).strip()]
+        skills = existing
 
     text = build_mentor_profile_text(
         domain=doc.get("domain") or "",

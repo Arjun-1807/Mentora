@@ -46,6 +46,7 @@ from app.config import settings  # noqa: E402
 from app.db.mongo import get_mentors_collection  # noqa: E402
 from app.models.schemas import StartupProfile  # noqa: E402
 from app.services import mentor_matching  # noqa: E402
+from seed_mentors import MENTORS as SEED_MENTORS  # noqa: E402
 from app.services.evaluation import (  # noqa: E402
     graded_ndcg_at_k,
     precision_at_k,
@@ -66,11 +67,27 @@ def _load_eval_set() -> dict:
 
 
 def _mentor_emails() -> Dict[str, str]:
-    """mentor _id (str) -> lower-cased email for every mentor in the DB."""
-    return {
-        str(doc["_id"]): (doc.get("email") or "").strip().lower()
-        for doc in get_mentors_collection().find({}, {"email": 1})
-    }
+    """mentor _id (str) -> lower-cased judging key (the seed email) for every
+    mentor in the DB.
+
+    A seeded mentor whose email was changed in the database (e.g. claimed by
+    a demo login for smoke tests) is still recognised through its seed name,
+    so other work on the staging DB does not silently shrink the judged pool.
+    """
+    seed_email_by_name = {mentor["name"]: mentor["email"].lower() for mentor in SEED_MENTORS}
+    keys = {}
+    for doc in get_mentors_collection().find({}, {"email": 1, "name": 1, "seeded": 1, "skills": 1}):
+        email = (doc.get("email") or "").strip().lower()
+        if doc.get("seeded") and doc.get("name") in seed_email_by_name:
+            if email != seed_email_by_name[doc["name"]]:
+                print(f"note: seeded mentor {doc['name']!r} has email {email!r}; judging it by its seed email",
+                      file=sys.stderr)
+            email = seed_email_by_name[doc["name"]]
+            if not doc.get("skills"):
+                print(f"WARNING: seeded mentor {doc['name']!r} has no skills (run scripts/backfill_mentor_skills.py)",
+                      file=sys.stderr)
+        keys[str(doc["_id"])] = email
+    return keys
 
 
 def _full_ranking(profile: StartupProfile):
@@ -83,7 +100,7 @@ def _full_ranking(profile: StartupProfile):
         mentor_matching.TOP_K_RESULTS = original
 
 
-def evaluate(verbose: bool = False) -> dict:
+def evaluate(verbose: bool = False, drop_geography: bool = False) -> dict:
     eval_set = _load_eval_set()
     judged = {email.lower() for email in eval_set["judged_mentors"]}
     emails = _mentor_emails()
@@ -94,6 +111,8 @@ def evaluate(verbose: bool = False) -> dict:
     per_profile = []
     for item in eval_set["profiles"]:
         profile = StartupProfile.model_validate(item["profile"])
+        if drop_geography:
+            profile = profile.model_copy(update={"geography": None})
         grades = {email.lower(): grade for email, grade in item["relevance"].items()}
         ranking = _full_ranking(profile)
         shown = ranking[:K]
@@ -190,6 +209,11 @@ def main() -> int:
     parser.add_argument("--allow-prod-db", action="store_true", help="allow running against the `mentora` DB")
     parser.add_argument("-v", "--verbose", action="store_true", help="print per-profile results")
     parser.add_argument(
+        "--drop-geography", action="store_true",
+        help="ignore the profiles' geography (the hand-written set often puts a startup in a relevant "
+             "seed mentor's city, which flatters the geography term)",
+    )
+    parser.add_argument(
         "--set", action="append", default=[], metavar="NAME=VALUE",
         help="override a numeric constant of app/services/mentor_matching.py for this run (repeatable)",
     )
@@ -211,7 +235,7 @@ def main() -> int:
         return 2
 
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-    result = evaluate(verbose=args.verbose)
+    result = evaluate(verbose=args.verbose, drop_geography=args.drop_geography)
     stored = _load_baseline_file()
 
     if args.save_baseline:
