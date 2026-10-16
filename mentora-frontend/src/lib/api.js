@@ -1,7 +1,7 @@
 // Single source of truth for all backend API calls.
 import { toast } from "sonner";
 import {
-  clearToken,
+  clearSession,
   getToken,
   roleFromToken,
   setToken,
@@ -28,14 +28,16 @@ export class ApiError extends Error {
 let logoutPending = false;
 
 /**
- * Clears the auth token and sends the user back to /login.
+ * Clears the session (token plus every per-user cache, so the next account
+ * on this browser never sees the previous one's profile or matches) and
+ * sends the user back to /login.
  *
  * The navigation is deferred to a macrotask so this is safe to call from
  * inside a fetch handler that resolves mid-render, and it is de-duplicated so
  * several parallel 401s don't fight over the location.
  */
 export function forceLogout({ redirect = true } = {}) {
-  clearToken();
+  clearSession();
   if (!redirect || typeof window === "undefined" || logoutPending) return;
 
   const { pathname, search } = window.location;
@@ -142,69 +144,81 @@ export function extractPitchDeck(file) {
   return request("/extract", { method: "POST", body: formData, isFormData: true });
 }
 
-/** Sends a startup profile and gets back ranked mentor matches. */
+/**
+ * Ranks mentors for the startup's active (server-side) profile and records
+ * them as `suggested` matches. Resolves to `{matches: [...]}`. Passing a
+ * profile is only for older callers: it is saved as a new profile version.
+ */
 export function matchMentors(profile) {
-  return request("/match", { method: "POST", body: profile });
+  return request("/match", { method: "POST", body: profile || undefined });
+}
+
+/* ------------------------------------------------------- startup journey */
+
+/**
+ * The caller's startup: `{startup_id, company_name, org_id, cohort_id,
+ * active_profile: {profile_id, version, source, profile, deck_feedback,
+ * deck_filename, created_at} | null, profile_count}`.
+ */
+export function getStartupMe() {
+  return request("/startup/me", { method: "GET" });
+}
+
+/** Renames the startup: resolves to the same shape as `getStartupMe`. */
+export function updateStartup({ company_name }) {
+  return request("/startup/me", { method: "PATCH", body: { company_name } });
+}
+
+/** Every profile version, newest first: `{profiles: [...]}`. */
+export function listStartupProfiles() {
+  return request("/startup/profiles", { method: "GET" });
+}
+
+/**
+ * Corrects extracted fields (any of domain, stage, challenges, team_gaps,
+ * geography). Saves a new version; resolves like `getStartupMe`.
+ */
+export function updateActiveProfile(fields) {
+  return request("/startup/profiles/active", { method: "PATCH", body: fields });
+}
+
+/**
+ * The startup's matches (server-side source of truth), newest first:
+ * `{matches: [{match_id, mentor_id, name, domain, stage_focus, expertise,
+ * email, match_score, status, meeting, replacement_for, replacement_for_name,
+ * history, ...}]}`. Superseded suggestions are left out.
+ */
+export function listMatches() {
+  return request("/matches", { method: "GET" });
+}
+
+/**
+ * Sends the reviewed intro email to the mentor (the backend looks up the
+ * recipient) and marks the match `requested`. Resolves to
+ * `{success, delivery: "smtp" | "log", match}`.
+ */
+export function requestIntro(matchId, { subject, body }) {
+  return request(`/matches/${encodeURIComponent(matchId)}/request`, {
+    method: "POST",
+    body: { subject, body },
+  });
+}
+
+/** Withdraws an unanswered request (`requested` -> `withdrawn`); resolves to `{success, match}`. */
+export function withdrawRequest(matchId) {
+  return request(`/matches/${encodeURIComponent(matchId)}/withdraw`, { method: "POST" });
 }
 
 /**
  * Asks the backend to draft an intro email for a startup/mentor pair.
- *
- * Nothing is delivered here — delivery goes through `sendEmail` once the
- * founder has reviewed the draft. When `matchId` is supplied the backend also
- * advances that match's lifecycle to `emailed`.
+ * Nothing is sent: `requestIntro` delivers the reviewed draft. Without a
+ * `startupProfile` the backend uses the startup's active profile.
  */
 export function draftIntroEmail(startupProfile, mentor, matchId) {
-  const body = { startup_profile: startupProfile, mentor };
+  const body = { mentor };
+  if (startupProfile) body.startup_profile = startupProfile;
   if (matchId) body.match_id = matchId;
   return request("/email", { method: "POST", body });
-}
-
-/**
- * Delivers an email through the Next.js `/api/send-email` route (Resend).
- *
- * That route lives on the frontend origin, not the FastAPI backend, but it
- * checks the same bearer token (against `/me`) so it can't be used as an
- * open relay.
- */
-export async function sendEmail({ to, subject, body }) {
-  const headers = { "Content-Type": "application/json" };
-  const token = getToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-
-  let res;
-  try {
-    res = await fetch("/api/send-email", {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ to, subject, body }),
-    });
-  } catch {
-    toast.error(SERVER_UNAVAILABLE_MESSAGE, { id: "server-unavailable" });
-    throw new ApiError(SERVER_UNAVAILABLE_MESSAGE, 0);
-  }
-
-  let payload = null;
-  try {
-    payload = await res.json();
-  } catch {
-    // ignore — handled below
-  }
-  if (!res.ok) {
-    throw new ApiError(messageFromPayload(payload, res.status), res.status, payload);
-  }
-  return payload;
-}
-
-/**
- * Advances a match's lifecycle status (`emailed` or `email_sent`).
- * The backend only ever moves a match forwards, so this is safe to repeat.
- */
-export function updateMatchStatus(matchId, status) {
-  return request("/feedback-status", {
-    method: "POST",
-    body: { match_id: matchId, status },
-  });
 }
 
 /** Saves the mentor onboarding profile (re-embeds it for matching). */
@@ -226,23 +240,6 @@ export function runEvaluation(startupProfile, groundTruthMentorIds) {
 /** Logs the outcome (attendance + rating) of a mentor match. */
 export function logFeedback(payload) {
   return request("/feedback", { method: "POST", body: payload });
-}
-
-/**
- * Fetches the current user's match documents, for the dashboard.
- *
- * The endpoint is a POST today (it predates being a plain read); accept a
- * GET-only deployment too rather than breaking on a method change.
- */
-export async function getAllMatches() {
-  try {
-    return await request("/matches/all", { method: "POST" });
-  } catch (err) {
-    if (err instanceof ApiError && (err.status === 404 || err.status === 405)) {
-      return request("/matches/all", { method: "GET" });
-    }
-    throw err;
-  }
 }
 
 /**

@@ -40,11 +40,11 @@ function Chip({ selected, onClick, children }) {
  * the mentor's weekly slots into the next 14 days, lets the founder pick a
  * date + time window, and books it via POST /calendar/book.
  */
-export default function BookingSection({ match, onBooked }) {
+export default function BookingSection({ match, onBooked, defaultOpen = false }) {
   const router = useRouter();
   const panelId = useId();
   const descriptionId = useId();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   // Which `reloadKey` the current `days` were fetched for (-1 = never).
   const [loadedKey, setLoadedKey] = useState(-1);
   const [loading, setLoading] = useState(false);

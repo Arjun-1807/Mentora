@@ -18,7 +18,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { draftIntroEmail, sendEmail, updateMatchStatus } from "@/lib/api";
+import { draftIntroEmail, requestIntro } from "@/lib/api";
 import { toMentorPayload, toStartupProfilePayload } from "@/components/matches/matchData";
 
 function initialsFor(name) {
@@ -72,8 +72,11 @@ function MentorSummary({ mentor }) {
 
 /**
  * Two-panel intro email dialog. On open it drafts an email via POST /email
- * (which also advances the match to "emailed"), lets the founder edit it, and
- * sends it through /api/send-email, then marks the match "email_sent".
+ * (nothing is sent yet), lets the founder edit it, and on "Send" calls
+ * POST /matches/{match_id}/request, which emails the mentor from the backend
+ * and moves the match to "requested". `startupProfile` is optional: without
+ * it the backend drafts from the startup's active profile. `onSent` receives
+ * the updated match.
  */
 export default function EmailDialog({ open, onOpenChange, mentor, startupProfile, onSent }) {
   const [loading, setLoading] = useState(false);
@@ -116,7 +119,7 @@ export default function EmailDialog({ open, onOpenChange, mentor, startupProfile
   }, [open, mentor, startupProfile, reloadKey]);
 
   const ready = !loading && !error;
-  const canSend = ready && !sending && Boolean(mentor?.email) && subject.trim() && body.trim();
+  const canSend = ready && !sending && Boolean(mentor?.match_id) && subject.trim() && body.trim();
 
   async function handleCopy() {
     try {
@@ -130,31 +133,28 @@ export default function EmailDialog({ open, onOpenChange, mentor, startupProfile
   async function handleSend() {
     if (!canSend) return;
     setSending(true);
+    let result;
     try {
-      await sendEmail({ to: mentor.email, subject: subject.trim(), body: body.trim() });
+      // The backend looks the mentor's address up itself and marks the
+      // match "requested" once the email is out.
+      result = await requestIntro(mentor.match_id, { subject: subject.trim(), body: body.trim() });
     } catch (err) {
       // Network failures already raised the "Server unavailable" toast.
       if (err.status !== 0) {
-        toast.error(err.message || "Failed to send email. Check your Resend API key in .env.local.");
+        toast.error(err.message || "Failed to send the intro. Please try again.");
       }
       setSending(false);
       return;
     }
 
-    toast.success(`Email sent to ${mentorName}`);
+    toast.success(
+      result?.delivery === "log"
+        ? `Intro to ${mentorName} recorded (email delivery is in log mode on this server).`
+        : `Intro sent to ${mentorName}`
+    );
     onOpenChange(false);
     setSending(false);
-
-    // The email is already out; a failed status update shouldn't read as a
-    // failed send, so it gets its own, softer message.
-    if (mentor.match_id) {
-      try {
-        await updateMatchStatus(mentor.match_id, "email_sent");
-      } catch {
-        toast.warning("Email sent, but the match status couldn't be updated.");
-      }
-    }
-    onSent?.(mentor);
+    onSent?.(result?.match ? { ...mentor, ...result.match } : { ...mentor, status: "requested" });
   }
 
   return (
@@ -213,12 +213,10 @@ export default function EmailDialog({ open, onOpenChange, mentor, startupProfile
                     {body.length} characters
                   </p>
                 </div>
-                {!mentor?.email && (
-                  <p className="text-xs text-muted-foreground">
-                    We don&apos;t have an email address for {mentorName} yet — copy the draft and
-                    send it yourself. Refreshing your matches may pick up newly added contact details.
-                  </p>
-                )}
+                <p className="text-xs text-muted-foreground">
+                  Mentora sends this from its own address with your email as the reply-to, and
+                  marks the match as requested. {mentorName} can then accept or decline.
+                </p>
               </div>
             )}
           </div>
@@ -235,7 +233,7 @@ export default function EmailDialog({ open, onOpenChange, mentor, startupProfile
             ) : (
               <Send className="h-4 w-4" aria-hidden="true" />
             )}
-            {sending ? "Sending…" : "Send Email"}
+            {sending ? "Sending…" : "Send request"}
           </Button>
         </DialogFooter>
       </DialogContent>
