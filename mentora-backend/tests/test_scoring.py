@@ -400,7 +400,7 @@ def _load(fake_mongo, mentor_id, n, *, status="accepted", days_ago=1, field="ema
     when = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
     for i in range(n):
         insert_match(fake_mongo, user_id=f"startup-{mentor_id}-{i}", mentor_id=mentor_id, status=status,
-                     **{field: when} if field == "email_sent_at" else {"timestamp": when})
+                     **{field: when})
 
 
 def _pool(n, **overrides):
@@ -431,8 +431,10 @@ def test_capacity_load_counts_only_recent_requested_or_later(fake_mongo):
     _load(fake_mongo, "a", 1, status="pending")                           # never requested
     _load(fake_mongo, "a", 1, status="completed")                         # engagement finished
     _load(fake_mongo, "b", 1, status="accepted", field="timestamp")        # no email_sent_at -> timestamp
-    assert mm.recent_loads(["a", "b", "c"]) == {"a": 3, "b": 1}
-    assert mm.CAPACITY_LOAD_STATUSES == ["email_sent", "accepted", "meeting_scheduled"]
+    _load(fake_mongo, "c", 1, status="requested", field="requested_at")    # new lifecycle status + field
+    _load(fake_mongo, "c", 1, status="requested", field="requested_at", days_ago=40)  # too old
+    assert mm.recent_loads(["a", "b", "c"]) == {"a": 3, "b": 1, "c": 1}
+    assert mm.CAPACITY_LOAD_STATUSES == ["requested", "accepted", "meeting_scheduled"]
 
 
 def test_mentors_at_capacity_are_dropped_when_enough_remain(fake_vector_search, fake_mongo):

@@ -2,20 +2,24 @@
 Dashboard stat cards.
 
 GET /dashboard/stats (JWT) -> {total_matches, emails_sent, meetings_accepted, avg_rating}
-    Scoped like POST /matches/all: a startup counts the matches it created,
-    a mentor the matches pointing at its mentor record.
-      emails_sent       = matches at `email_sent` or later, or carrying
-                          `email_sent_at` (e.g. later declined).
-      meetings_accepted = accepted / meeting_scheduled / completed.
+    Scoped like POST /matches/all: a startup counts its matches (superseded
+    suggestions excluded), a mentor the matches pointing at its mentor
+    record from `requested` on.
+      emails_sent       = matches at `requested` or later (incl. declined /
+                          withdrawn / expired), or carrying `email_sent_at`.
+      meetings_accepted = accepted / meeting_scheduled / met / completed.
       avg_rating        = mean rating of the caller's feedback (a startup's
                           submitted feedback; a mentor's received feedback),
                           null when there is none.
 
 GET /mentor/stats (JWT, mentor) -> {pending_requests, accepted, avg_rating, total_helped}
-      pending_requests = pending / emailed / email_sent
-      accepted         = accepted / meeting_scheduled / completed
+      pending_requests = requested (waiting for the mentor's answer)
+      accepted         = accepted / meeting_scheduled / met / completed
       avg_rating       = mean rating of feedback received, null if none
-      total_helped     = distinct startups with a meeting_scheduled/completed match
+      total_helped     = distinct startups with a meeting_scheduled/met/completed match
+
+Legacy status spellings (pending / emailed / email_sent) count as their
+lifecycle equivalents, and stale requests are expired before counting.
 """
 import logging
 from typing import Any, Dict, Optional
@@ -32,6 +36,10 @@ from app.services.matches import (
     EMAIL_SENT_OR_LATER,
     MEETING_STATUSES,
     REQUEST_STATUSES,
+    REQUESTED_OR_LATER,
+    VISIBLE_FILTER,
+    expire_stale_requests,
+    status_in,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,24 +75,32 @@ async def dashboard_stats(user=Depends(get_current_user)) -> DashboardStatsRespo
     try:
         if user.get("role") == "mentor":
             mentor_id = _linked_mentor_id(user_id)
-            match_filter = {"mentor_id": mentor_id} if mentor_id else {"user_id": user_id}
+            scope = {"mentor_id": mentor_id} if mentor_id else {"user_id": user_id}
+            # Mentors never see suggestions: count only what was requested.
+            match_filter = {**scope, "status": status_in(REQUESTED_OR_LATER), "duplicate_of": {"$exists": False}}
             feedback_filter = {"mentor_id": mentor_id} if mentor_id else {"user_id": user_id}
         else:
-            match_filter = {"user_id": user_id}
+            scope = {"user_id": user_id}
+            match_filter = {**scope, **VISIBLE_FILTER}
             feedback_filter = {"user_id": user_id}
 
+        expire_stale_requests(scope)
         matches = get_matches_collection()
         total = matches.count_documents(match_filter)
         emails_sent = matches.count_documents(
             {
-                **match_filter,
-                "$or": [
-                    {"status": {"$in": EMAIL_SENT_OR_LATER}},
-                    {"email_sent_at": {"$exists": True, "$ne": None}},
-                ],
+                "$and": [
+                    match_filter,
+                    {
+                        "$or": [
+                            {"status": status_in(EMAIL_SENT_OR_LATER)},
+                            {"email_sent_at": {"$exists": True, "$ne": None}},
+                        ]
+                    },
+                ]
             }
         )
-        accepted = matches.count_documents({**match_filter, "status": {"$in": ACCEPTED_STATUSES}})
+        accepted = matches.count_documents({"$and": [match_filter, {"status": status_in(ACCEPTED_STATUSES)}]})
         avg_rating = _avg_rating(feedback_filter)
     except Exception:
         logger.exception("Failed to compute dashboard stats for user %s", user_id)
@@ -106,10 +122,12 @@ async def mentor_stats(user=Depends(get_current_user)) -> MentorStatsResponse:
         if not mentor_id:
             return MentorStatsResponse(pending_requests=0, accepted=0, avg_rating=None, total_helped=0)
 
+        expire_stale_requests({"mentor_id": mentor_id})
         matches = get_matches_collection()
-        pending = matches.count_documents({"mentor_id": mentor_id, "status": {"$in": REQUEST_STATUSES}})
-        accepted = matches.count_documents({"mentor_id": mentor_id, "status": {"$in": ACCEPTED_STATUSES}})
-        helped = matches.distinct("user_id", {"mentor_id": mentor_id, "status": {"$in": MEETING_STATUSES}})
+        base = {"mentor_id": mentor_id, "duplicate_of": {"$exists": False}}
+        pending = matches.count_documents({**base, "status": status_in(REQUEST_STATUSES)})
+        accepted = matches.count_documents({**base, "status": status_in(ACCEPTED_STATUSES)})
+        helped = matches.distinct("user_id", {**base, "status": status_in(MEETING_STATUSES)})
         avg_rating = _avg_rating({"mentor_id": mentor_id})
     except Exception:
         logger.exception("Failed to compute mentor stats for user %s", user_id)

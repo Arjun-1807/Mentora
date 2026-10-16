@@ -19,6 +19,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import InvitePanel from "@/components/coordinator/InvitePanel";
 import { TrendArrow } from "@/components/dashboard/HealthScoreCard";
 import { cohortCsv, dateLabel, healthTone, sortCohort } from "@/components/dashboard/helpers";
 import { getCohortHealth } from "@/lib/api";
@@ -155,7 +156,7 @@ function CohortContent() {
             <StateCard
               icon={Users}
               title="No startups yet"
-              description="Startups appear here once they register on Mentora."
+              description="Startups appear here once they join through your cohort's startup link (see Invites below)."
               className="border-0 bg-transparent shadow-none ring-0"
             />
           ) : (
@@ -269,6 +270,8 @@ function CohortContent() {
           )}
         </CardContent>
       </Card>
+
+      <InvitePanel />
     </PageWrapper>
   );
 }

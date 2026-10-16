@@ -57,13 +57,16 @@ import {
   statusOf,
   withHealthLogged,
 } from "@/components/dashboard/helpers";
+import EmailDialog from "@/components/matches/EmailDialog";
+import BookingDialog from "@/components/matches/BookingDialog";
 import {
-  getAllMatches,
   getDashboardStats,
   getFeedbackSummary,
+  listMatches,
   listMentors,
   logFeedback,
 } from "@/lib/api";
+import { setStoredMatches } from "@/lib/storage";
 
 const TABS = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
@@ -87,14 +90,15 @@ const TAB_COPY = {
   },
 };
 
-/** Statuses that mean an intro email was actually delivered for this match. */
-const SENT_STATUSES = new Set(["email_sent", "sent", "accepted", "declined", "meeting_scheduled"]);
-const ACCEPTED_STATUSES = new Set(["accepted", "meeting_scheduled", "completed"]);
+/** Statuses that mean an intro request was actually sent for this match. */
+const SENT_STATUSES = new Set([
+  "requested", "accepted", "declined", "withdrawn", "expired", "meeting_scheduled", "met", "completed",
+]);
+const ACCEPTED_STATUSES = new Set(["accepted", "meeting_scheduled", "met", "completed"]);
+/** Feedback (rating) can be logged once a meeting was booked (POST /feedback gate). */
+const FEEDBACK_STATUSES = new Set(["meeting_scheduled", "met"]);
 
-/**
- * A "completed" match may or may not have had an intro sent through Mentora,
- * so `email_sent_at` (stamped by POST /feedback-status) is the reliable signal.
- */
+/** `email_sent_at` is stamped when POST /matches/{id}/request sends the intro. */
 function introSent(match) {
   return Boolean(match?.email_sent_at) || SENT_STATUSES.has(statusOf(match));
 }
@@ -264,6 +268,42 @@ function EmptyMatches() {
   );
 }
 
+/**
+ * The next step for a match, as a row button: send the intro (suggested),
+ * book a meeting (accepted), log the outcome (meeting booked / met).
+ * `onAction(kind, match)` with kind "request" | "book" | "log".
+ */
+function RowAction({ match, name, onAction }) {
+  const status = statusOf(match);
+  const who = name || "this mentor";
+  if (status === "suggested") {
+    return (
+      <Button type="button" size="sm" onClick={() => onAction("request", match)} aria-label={`Send intro to ${who}`}>
+        <Mail aria-hidden="true" />
+        Send intro
+      </Button>
+    );
+  }
+  if (status === "accepted") {
+    return (
+      <Button type="button" size="sm" onClick={() => onAction("book", match)} aria-label={`Book a meeting with ${who}`}>
+        <CalendarCheck aria-hidden="true" />
+        Book
+      </Button>
+    );
+  }
+  if (FEEDBACK_STATUSES.has(status)) {
+    return (
+      <Button type="button" size="sm" variant="outline" onClick={() => onAction("log", match)}
+        aria-label={`Log outcome for ${who}`}>
+        Log Outcome
+      </Button>
+    );
+  }
+  const label = { requested: "Awaiting reply", completed: "Logged" }[status] || "—";
+  return <span className="text-xs text-muted-foreground">{label}</span>;
+}
+
 function OverviewTab({
   stats,
   statsLoading,
@@ -274,6 +314,7 @@ function OverviewTab({
   healthKey,
   onRetry,
   onViewAll,
+  onAction,
 }) {
   const recent = matches.slice(0, 5);
   const avg = typeof stats?.avg_rating === "number" ? Math.round(stats.avg_rating * 10) / 10 : null;
@@ -352,6 +393,7 @@ function OverviewTab({
                   <TableHead>Score</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="hidden sm:table-cell">Date</TableHead>
+                  <TableHead className="text-right">Next step</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -367,6 +409,9 @@ function OverviewTab({
                       <TableCell className="hidden text-muted-foreground sm:table-cell">
                         {dateLabel(match.updated_at || match.timestamp)}
                       </TableCell>
+                      <TableCell className="text-right">
+                        <RowAction match={match} name={nameOf(match, null)} onAction={onAction} />
+                      </TableCell>
                     </TableRow>
                   );
                 })}
@@ -379,7 +424,7 @@ function OverviewTab({
   );
 }
 
-function MatchesTab({ matches, loading, error, nameOf, onRetry, onLog }) {
+function MatchesTab({ matches, loading, error, nameOf, onRetry, onAction }) {
   return (
     <Card>
       <CardContent>
@@ -409,7 +454,6 @@ function MatchesTab({ matches, loading, error, nameOf, onRetry, onLog }) {
             <TableBody>
               {matches.map((match, i) => {
                 const status = statusOf(match);
-                const done = status === "completed";
                 const { rating } = feedbackOf(match);
                 const name = nameOf(match, null);
                 return (
@@ -439,16 +483,7 @@ function MatchesTab({ matches, loading, error, nameOf, onRetry, onLog }) {
                       {dateLabel(match.updated_at || match.timestamp)}
                     </TableCell>
                     <TableCell className="text-right">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => onLog(match)}
-                        disabled={done}
-                        aria-label={done ? `Outcome logged for ${name || "this match"}` : `Log outcome for ${name || "this match"}`}
-                      >
-                        {done ? "Logged" : "Log Outcome"}
-                      </Button>
+                      <RowAction match={match} name={name} onAction={onAction} />
                     </TableCell>
                   </TableRow>
                 );
@@ -481,6 +516,10 @@ function StartupDashboard() {
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [healthMatch, setHealthMatch] = useState(null);
   const [healthOpen, setHealthOpen] = useState(false);
+  const [requestMatch, setRequestMatch] = useState(null);
+  const [requestOpen, setRequestOpen] = useState(false);
+  const [bookMatch, setBookMatch] = useState(null);
+  const [bookOpen, setBookOpen] = useState(false);
 
   const loadStats = useCallback(() => {
     let cancelled = false;
@@ -507,11 +546,12 @@ function StartupDashboard() {
     setMatchesLoading(true);
     setMatchesError("");
 
-    getAllMatches()
+    listMatches()
       .then((data) => {
         if (cancelled) return;
         const list = Array.isArray(data) ? data : data?.matches || [];
         setMatches([...list].sort((a, b) => matchTime(b) - matchTime(a)));
+        setStoredMatches(list); // cache only; the API stays the source of truth
       })
       .catch((err) => {
         if (!cancelled) setMatchesError(err.message || "Could not load your matches.");
@@ -578,11 +618,52 @@ function StartupDashboard() {
 
   const handleHealthLogged = useCallback(
     (match) => {
-      setMatches((prev) => prev.map((m) => (sameMatch(m, match) ? withHealthLogged(m, "startup") : m)));
+      setMatches((prev) =>
+        prev.map((m) => {
+          if (!sameMatch(m, match)) return m;
+          const logged = withHealthLogged(m, "startup");
+          // The first outcome log marks the meeting as met (server side).
+          return statusOf(logged) === "meeting_scheduled" ? { ...logged, status: "met" } : logged;
+        })
+      );
       setHealthKey((k) => k + 1);
       loadStats();
     },
     [loadStats]
+  );
+
+  const handleAction = useCallback((kind, match) => {
+    if (kind === "request") {
+      setRequestMatch(match);
+      setRequestOpen(true);
+    } else if (kind === "book") {
+      setBookMatch(match);
+      setBookOpen(true);
+    } else {
+      setFeedbackMatch(match);
+      setFeedbackOpen(true);
+    }
+  }, []);
+
+  const replaceMatch = useCallback(
+    (next) => {
+      if (!next) return;
+      setMatches((prev) => prev.map((m) => (sameMatch(m, next) ? { ...m, ...next } : m)));
+      loadStats();
+    },
+    [loadStats]
+  );
+
+  // Stable objects: EmailDialog re-drafts (an LLM call) whenever `mentor` changes.
+  const requestMentor = useMemo(
+    () => (requestMatch ? { ...requestMatch, name: requestMatch.name || nameOf(requestMatch, "your mentor") } : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [requestMatch]
+  );
+  const bookingMatch = useMemo(
+    () => (bookMatch ? { ...bookMatch, name: bookMatch.name || nameOf(bookMatch, "your mentor") } : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [bookMatch]
   );
 
   const copy = TAB_COPY[tab];
@@ -642,6 +723,7 @@ function StartupDashboard() {
               healthKey={healthKey}
               onRetry={() => setReloadKey((k) => k + 1)}
               onViewAll={() => setTab("matches")}
+              onAction={handleAction}
             />
           )}
           {tab === "matches" && (
@@ -651,10 +733,7 @@ function StartupDashboard() {
               error={matchesError}
               nameOf={nameOf}
               onRetry={() => setReloadKey((k) => k + 1)}
-              onLog={(m) => {
-                setFeedbackMatch(m);
-                setFeedbackOpen(true);
-              }}
+              onAction={handleAction}
             />
           )}
           {tab === "metrics" && <MetricsPanel />}
@@ -675,6 +754,18 @@ function StartupDashboard() {
         role="startup"
         counterpartName={healthMatch ? nameOf(healthMatch, null) : null}
         onLogged={handleHealthLogged}
+      />
+      <EmailDialog
+        open={requestOpen}
+        onOpenChange={setRequestOpen}
+        mentor={requestMentor}
+        onSent={replaceMatch}
+      />
+      <BookingDialog
+        open={bookOpen}
+        onOpenChange={setBookOpen}
+        match={bookingMatch}
+        onBooked={(match, meeting) => replaceMatch({ ...match, status: "meeting_scheduled", meeting })}
       />
     </DashboardShell>
   );

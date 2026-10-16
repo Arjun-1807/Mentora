@@ -16,6 +16,7 @@ from tests.conftest import (
     insert_match,
     me,
     register,
+    register_coordinator,
 )
 
 FUTURE_MONDAY = "2099-01-05"
@@ -179,7 +180,7 @@ def test_exchange_code_rejects_missing_calendar_scope(configured, monkeypatch):
 
 
 def test_callback_stores_tokens_and_consumes_state(client, fake_mongo, configured, monkeypatch):
-    token = register(client, COORDINATOR_PAYLOAD)
+    token = register_coordinator(client)
     user_id = me(client, token)["user_id"]
     monkeypatch.setattr(gcal, "build_authorization_url", lambda state: (f"https://accounts.google.com/x?state={state}", "v-1"))
     exchanged = []

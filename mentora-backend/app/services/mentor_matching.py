@@ -55,7 +55,7 @@ from fastapi import HTTPException
 from app.config import settings
 from app.db.mongo import get_feedback_collection, get_matches_collection, get_mentors_collection
 from app.models.schemas import MentorMatch, StartupProfile
-from app.services.matches import CAPACITY_LOAD_STATUSES
+from app.services.matches import CAPACITY_LOAD_STATUSES, status_in
 from app.services.embeddings import build_startup_profile_text, embed_passages, embed_queries, embed_query
 
 logger = logging.getLogger(__name__)
@@ -328,9 +328,10 @@ def monthly_capacity(setting: Any) -> Optional[int]:
 
 
 def recent_loads(mentor_ids: Sequence[str], now: Optional[datetime] = None) -> Dict[str, int]:
-    """Per mentor id, the number of matches in CAPACITY_LOAD_STATUSES whose
-    request (email_sent_at, else the match timestamp) is within the last
-    CAPACITY_WINDOW_DAYS. A database failure is logged and treated as no
+    """Per mentor id, the number of matches in CAPACITY_LOAD_STATUSES (legacy
+    spellings included) whose request time - requested_at, else the legacy
+    email_sent_at, else the match timestamp - is within the last
+    CAPACITY_WINDOW_DAYS. De-duplicated legacy copies are not counted. A database failure is logged and treated as no
     load - capacity must never fail a /match request."""
     if not mentor_ids:
         return {}
@@ -339,10 +340,16 @@ def recent_loads(mentor_ids: Sequence[str], now: Optional[datetime] = None) -> D
         {
             "$match": {
                 "mentor_id": {"$in": list(mentor_ids)},
-                "status": {"$in": list(CAPACITY_LOAD_STATUSES)},
+                "status": status_in(CAPACITY_LOAD_STATUSES),
+                "duplicate_of": {"$exists": False},
                 "$or": [
-                    {"email_sent_at": {"$gte": cutoff}},
-                    {"email_sent_at": {"$exists": False}, "timestamp": {"$gte": cutoff}},
+                    {"requested_at": {"$gte": cutoff}},
+                    {"requested_at": {"$exists": False}, "email_sent_at": {"$gte": cutoff}},
+                    {
+                        "requested_at": {"$exists": False},
+                        "email_sent_at": {"$exists": False},
+                        "timestamp": {"$gte": cutoff},
+                    },
                 ],
             }
         },
@@ -530,8 +537,15 @@ def _run_vector_search(embedding: List[float]) -> List[dict]:
         ) from exc
 
 
-def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
-    """Find and rank the top mentors for a given startup profile."""
+def find_matching_mentors(
+    profile: StartupProfile, exclude_mentor_ids: Optional[Iterable[str]] = None
+) -> List[MentorMatch]:
+    """Find and rank the top mentors for a given startup profile.
+
+    `exclude_mentor_ids` (mentors-collection ids) are dropped before ranking,
+    e.g. mentors the startup already has a match with when picking a
+    replacement suggestion.
+    """
     profile_text = build_startup_profile_text(
         domain=profile.domain,
         stage=profile.stage,
@@ -540,7 +554,11 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
     )
     query_embedding = embed_query(profile_text)
 
-    candidates, penalised_ids = apply_eligibility(_run_vector_search(query_embedding))
+    candidates = _run_vector_search(query_embedding)
+    if exclude_mentor_ids:
+        excluded = {str(mentor_id) for mentor_id in exclude_mentor_ids}
+        candidates = [c for c in candidates if str(c.get("_id", "")) not in excluded]
+    candidates, penalised_ids = apply_eligibility(candidates)
 
     if not candidates:
         return []

@@ -17,19 +17,26 @@ with feedback that feeds back into ranking.
   immediately matchable.
 - `POST /extract` — upload a pitch-deck PDF, get structured JSON
   (`domain`, `stage`, `challenges`, `team_gaps`, `geography`) via
-  PyMuPDF + Groq.
-- `POST /match` — submit a structured startup profile, get the top 5
-  matching mentors via MongoDB Atlas `$vectorSearch` plus a weighted
-  re-rank; match records are persisted per user.
-- `POST /matches/all` — the calling user's match history.
+  PyMuPDF + Groq; saved as a new version of the startup's profile.
+- `GET /startup/me`, `GET /startup/profiles`, `PATCH /startup/me`,
+  `PATCH /startup/profiles/active` — the startup's server-side record:
+  company name and versioned profiles (see "Startup journey" below).
+- `POST /match` — top 5 mentors for the startup's active profile via
+  MongoDB Atlas `$vectorSearch` plus a weighted re-rank; recorded as
+  `suggested` matches keyed on (startup, mentor).
+- `GET /matches` — the startup's matches (the source of truth for the UI).
+- `POST /matches/{id}/request` — send the intro email (backend SMTP) and
+  mark the match `requested`; `POST /matches/{id}/withdraw` takes it back.
+- `GET /mentor/matches`, `PATCH /mentor/matches/{id}` — the mentor's
+  inbox (requested and later only) and accept / decline.
+- `POST /matches/all` — legacy listing of the caller's matches.
 - `GET /mentors` — mentor directory (never returns embeddings).
-- `POST /email` — Groq drafts an intro email; advances the match to
-  `emailed`.
-- `POST /feedback` — attendance + 1-5 rating, recomputes the mentor's
-  rolling-average `effectiveness_score`, completes the match.
+- `POST /email` — Groq drafts an intro email (nothing is sent).
+- `POST /feedback` — attendance + 1-5 rating once a meeting was booked,
+  recomputes the mentor's rolling-average `effectiveness_score`,
+  completes the match.
 - `GET /feedback/summary` — per-mentor aggregate feedback stats.
-- `POST /feedback-status` — advance a match to `emailed` / `email_sent`
-  (the frontend calls it after actually delivering the intro email).
+- `POST /feedback-status` — deprecated no-op (reports the status).
 - `PATCH /mentor/profile` — mentor onboarding: saves the full mentor
   profile and re-embeds it for vector search.
 - `POST /evaluate` — retrieval metrics (precision@5, recall@5, MRR,
@@ -40,6 +47,9 @@ with feedback that feeds back into ranking.
 - `/health/*` — startup health score from post-meeting outcomes, plus a
   coordinator cohort view.
 - Roles: `startup`, `mentor` and `coordinator` (incubator staff).
+- Tenancy: organizations → cohorts, invite links (`/invites/*`,
+  `/cohorts/{id}/invites`, `/orgs/me`). Coordinators are invite-only and
+  scoped to their own cohorts. See "Tenancy" below.
 
 ## 1. Install dependencies
 
@@ -84,7 +94,33 @@ Optional overrides (all documented in `.env.example`): `GROQ_MODEL`,
 `MONGODB_*`, `EMBEDDING_*`, `FRONTEND_ORIGIN`, `JWT_ALGORITHM`,
 `JWT_EXPIRE_MINUTES` (default 1440 = 24h), `MAX_UPLOAD_BYTES` (default
 10 MB), `RATE_LIMIT_ENABLED`, `LOGIN_RATE_LIMIT`,
-`LOGIN_RATE_WINDOW_SECONDS`, `LLM_RATE_LIMIT`, `LLM_RATE_WINDOW_SECONDS`.
+`LOGIN_RATE_WINDOW_SECONDS`, `LLM_RATE_LIMIT`, `LLM_RATE_WINDOW_SECONDS`,
+`MATCH_REQUEST_RATE_LIMIT`, `MATCH_REQUEST_RATE_WINDOW_SECONDS`,
+`MATCH_REQUEST_TTL_DAYS` (default 7).
+
+### Email
+
+Intro requests and lifecycle notifications are sent **by the backend**
+through Gmail SMTP (`app/services/mailer.py`); the frontend has no email
+route or keys any more. The recipient is always looked up server-side
+(the mentor's address on file, or the startup owner's), never taken from
+the client.
+
+```
+GMAIL_USER=mentora.notifications@gmail.com
+GMAIL_APP_PASSWORD=<16-character Google App Password>
+EMAIL_DELIVERY=            # smtp | log; empty = smtp when both values above are set, else log
+```
+
+Gmail setup: turn on 2-Step Verification for the sending account, then
+create an App Password (myaccount.google.com → Security → App passwords).
+In `log` mode (the default without credentials, handy for staging) nothing
+is sent; every message is still written to the `outbox` collection
+(`{to, subject, body, reply_to, kind, match_id, delivery, status, created_at}`),
+which is also the audit trail in `smtp` mode. Explicitly setting
+`EMAIL_DELIVERY=smtp` without credentials makes sends fail (`502`) instead
+of silently logging. Gmail allows roughly 500 messages a day, which is why
+`POST /matches/{id}/request` is rate-limited per user.
 
 Google Calendar (optional — without the id/secret every `/calendar/*`
 endpoint except the slot endpoints and `/calendar/status` answers `503
@@ -226,6 +262,11 @@ failures are logged rather than fatal.
 | `oauth_states` | `created_at` (TTL 15 min) | no | Abandoned OAuth states expire on their own (the callback also checks the age). |
 | `meeting_notes` | `startup_id, timestamp` | no | Last-5-notes health score computation. |
 | `meeting_notes` | `match_id` | no | Per-match note lookups. |
+| `users` | `cohort_ids` | no | Coordinator cohort scoping. |
+| `organizations` | `slug` | yes | One org per slug (`legacy` is built in). |
+| `cohorts` | `org_id, name` | yes | One cohort per name within an org. |
+| `invites` | `token_hash` | yes | Invite lookup by sha256 of the token. |
+| `invites` | `cohort_id, created_at` | no | Coordinator invite listing. |
 
 ## 5. Seed the mentors collection
 
@@ -321,6 +362,18 @@ Auth: none. Body:
   limit — longer passwords are rejected with `422` rather than 500-ing).
 - `role`: `"startup"`, `"mentor"` or `"coordinator"` (incubator staff;
   no profile needed — coordinators see `GET /health/cohort`).
+- `invite_token` (optional): the token from a `/join/<token>` link. The
+  user joins the invite's org/cohort (`org_id`, `cohort_id`, `cohort_ids`
+  on the user). The invite's `role` must equal `role` (`400` otherwise),
+  an email-bound invite must match `email` (`403`), and an unknown token
+  is `404` while a revoked, expired or used-up one is `410`. Redeeming is
+  one atomic `find_one_and_update`, and the use is given back if the
+  registration then fails. A mentor invite with a `mentor_id` **claims**
+  that existing (e.g. seeded) mentor document instead of creating one, and
+  no profile is needed.
+- **Coordinators require a coordinator invite**: without one, `403`.
+  Startups and mentors without an invite land in the `legacy` org's
+  `default` cohort.
 - For `role: "mentor"`, `profile` is validated and requires only a
   `name` and at least one `sector_expertise` entry (a list, or a
   comma-separated string):
@@ -361,7 +414,10 @@ Auth: required. Response `200`:
   "profile": {},
   "mentor_id": null,
   "created_at": "2026-01-01T00:00:00+00:00",
-  "calendar_connected": false
+  "calendar_connected": false,
+  "org_id": "6660...",
+  "cohort_id": "6661...",
+  "cohort_ids": ["6661..."]
 }
 ```
 
@@ -417,7 +473,13 @@ Auth: required. Rate-limited per user. `multipart/form-data`, field name
 
 ### `POST /match`
 
-Auth: required. Body shaped like the `/extract` response:
+Auth: required. For a startup the body is normally **empty**: the
+startup's active profile (latest `/extract` or manual correction) is used,
+and `409` is returned when there is none yet. For backward compatibility a
+full profile body (shaped like the `/extract` response) is still accepted;
+if it differs from the active profile it is saved as a new version first.
+Non-startup accounts must send a profile and get a preview (nothing is
+recorded). Legacy body:
 
 ```json
 {
@@ -447,7 +509,9 @@ Auth: required. Body shaped like the `/extract` response:
         "email": "ava.chen@mentors.mentora.dev",
         "geography": "San Francisco, CA",
         "similarity": 0.8231,
-        "reasons": ["Customer acquisition cost is high → Customer discovery and product-market fit"]
+        "reasons": ["Customer acquisition cost is high → Customer discovery and product-market fit"],
+        "status": "suggested",
+        "replacement_for": null
       }
     ]
   }
@@ -455,14 +519,15 @@ Auth: required. Body shaped like the `/extract` response:
 - `reasons` (possibly empty) lists up to 3 "startup need → mentor skill"
   pairs behind the match, best first (see "Scoring / matching details").
   The frontend shows them as "Why this match" on each card.
-- Each match is persisted in `matches`, stamped with the caller's
-  `user_id` from the JWT `sub`, and **upserted** on
-  `(user_id, mentor_id, profile_fingerprint)` — the fingerprint being a
-  stable SHA-256 of the normalised startup profile. Re-matching the same
-  profile therefore refreshes the existing records (keeping their
-  `match_id` and `status`) instead of duplicating history and
-  double-counting dashboard stats.
-- `match_id` is the handle to pass to `/email` and `/feedback`.
+- Matches are keyed on the pair **(startup, mentor)**: one live document
+  per pair (`active: true`, partial unique index). A mentor already matched
+  keeps its document, `match_id` and status (e.g. `accepted`) and only gets
+  a refreshed score / `profile_id` / `startup_profile` snapshot, so a new
+  deck never strands an accepted match. Live `suggested` matches whose
+  mentor is no longer in the top 5 become `superseded`; mentors the startup
+  was declined / withdrawn / expired with are excluded from the ranking.
+- `match_id` is the handle for `/matches/{id}/request`, `/calendar/book`
+  and `/feedback`.
 - `similarity` is the raw clamped cosine score; `email` is the mentor's
   contact address (if known).
 - Errors: `404` `"No mentor profiles found. Please seed the database."`
@@ -470,19 +535,78 @@ Auth: required. Body shaped like the `/extract` response:
 - Errors: `401`, `422` invalid profile, `502` vector search unavailable
   (the client sees a generic message; details go to the server log).
 
+### `GET /matches`
+
+Auth: startup. The startup's matches, newest first — everything except
+`superseded` suggestions (declined / withdrawn / expired ones stay for
+history). Each item is the match document plus the mentor card fields
+(`name`, `domain`, `stage_focus`, `expertise`, `geography`, `email`,
+`match_score`) and, for replacements, `replacement_for_name`. Requests
+older than `MATCH_REQUEST_TTL_DAYS` are expired first (lazily — there is no
+scheduler). Errors: `401`, `403` not a startup, `502`.
+
+### `POST /matches/{match_id}/request`
+
+Auth: startup, own match, status `suggested`. Body:
+`{"subject": "...", "body": "..."}` (1-200 / 1-10000 chars, the reviewed
+draft from `/email`). Sends the intro to the mentor's address **looked up
+server-side** (never from the client), with the founder's email as
+Reply-To and a link to the mentor's requests tab
+(`FRONTEND_ORIGIN/mentor/dashboard?tab=requests`), then moves the match to
+`requested` (stamping `requested_at`, `email_sent_at` and `request`).
+Rate-limited per user (`MATCH_REQUEST_RATE_LIMIT`).
+
+- Response `200`: `{"success": true, "delivery": "smtp" | "log", "match": {...}}`
+- Errors: `403` not a startup / not your match, `404` unknown match,
+  `409` already requested (or no mentor email on file), `422`, `429`,
+  `502` delivery failed (the match stays `suggested`; retry is safe).
+
+### `POST /matches/{match_id}/withdraw`
+
+Auth: startup, own match, status `requested` → `withdrawn` (else `409`).
+A replacement suggestion is added. Response: `{"success": true, "match": {...}}`.
+
+### `GET /mentor/matches` / `PATCH /mentor/matches/{match_id}`
+
+Auth: mentor. The inbox only ever contains matches from `requested` on
+(`suggested` and `superseded` are the startup's private shortlist).
+`?status=requested,accepted` filters (legacy spellings accepted). Each item
+carries `company_name`, `startup_summary` (domain, stage, challenges,
+team gaps, geography), the intro `request` and — **only from `accepted`
+on** — `startup_email`.
+
+`PATCH` with `{"status": "accepted" | "declined"}` (uuid `match_id` or
+Mongo `_id`) goes through the state machine: only a `requested` match can
+be answered, repeating the same answer is a no-op `200`, anything else is
+`409` (a match never moves backwards); `404` for a suggestion, `403` for
+another mentor's match. The startup is emailed on accept / decline, and a
+decline adds a replacement suggestion.
+
 ### `POST /matches/all`
 
-Auth: required. No body. Returns only the caller's matches:
+Auth: required. Legacy listing: a `startup` sees its own matches
+(superseded excluded); a `mentor` sees matches pointing at their mentor
+record from `requested` on, shaped like `GET /mentor/matches`.
+Errors: `401`, `502`.
 
-- a `startup` user sees the matches they created (`user_id == sub`);
-- a `mentor` user sees matches pointing at their own mentor record
-  (`mentor_id == users.mentor_id`), so they see incoming interest without
-  seeing other startups' matches. A mentor account with no linked mentor
-  document falls back to its own outgoing matches.
+### Startup journey: `/startup/*`
 
-Nobody can read the whole collection. Response `200`:
-`{"matches": [ <match document>, ... ]}`, newest first, with `ObjectId`s
-and datetimes stringified. Errors: `401`, `502`.
+Auth: startup (`403` otherwise). The startup document is created on first
+use (and adopts the user's pre-existing matches).
+
+- `GET /startup/me` → `{startup_id, company_name, org_id, cohort_id,
+  active_profile: {profile_id, version, source, profile, deck_feedback,
+  deck_filename, created_at, active} | null, profile_count}`.
+- `GET /startup/profiles` → `{profiles: [...]}`, newest version first.
+- `PATCH /startup/me` `{company_name}` → as `GET /startup/me`.
+- `PATCH /startup/profiles/active` with any of `domain`, `stage`,
+  `challenges`, `team_gaps`, `geography` → saves a **new version**
+  (`source: "manual"`, keeping the deck feedback) and makes it active;
+  `409` before the first deck, `422` for an empty body or invalid values.
+
+Every `/extract` adds a version with `source: "deck"`, `deck_feedback` and
+`deck_filename`; its response also carries `profile_id`, `version` and
+`startup_id`.
 
 ### `GET /mentors`
 
@@ -522,9 +646,10 @@ Auth: required. Rate-limited per user. Body:
 }
 ```
 
-`match_id` is **optional** (it may also be supplied as `mentor.match_id`),
-so existing callers keep working. When present and owned by the caller,
-the match advances to status `emailed`.
+`startup_profile` is optional (the caller's active profile is used when it
+is missing); `match_id` is accepted for compatibility and ignored. This
+only drafts: nothing is sent and no status changes — the reviewed draft is
+sent with `POST /matches/{match_id}/request`.
 
 - Response `200`: `{"subject": "...", "body": "..."}`
 - Errors: `401`, `422`, `429`, `503` `"Email generation unavailable.
@@ -553,15 +678,17 @@ Checks performed, in order:
    owned.)
 4. The submitted `mentor_id` must equal the match record's `mentor_id` →
    else `400`.
-5. **One feedback per match**: a second submission for the same
+5. A meeting must have been booked: the match must be `meeting_scheduled`
+   or `met` → else `409`.
+6. **One feedback per match**: a second submission for the same
    `match_id` is rejected with `409` (enforced by a unique index, so it is
    race-free). Feedback therefore cannot be replayed to inflate or deflate
    a mentor's ranking.
 
 On success, the mentor's `effectiveness_score` is recomputed with a
 MongoDB `$group`/`$avg` aggregation (not by pulling every feedback
-document into Python), `feedback_count` is updated, and the match
-advances to `completed`.
+document into Python), `feedback_count` is updated, and the match moves
+to `completed` through the state machine.
 
 - Response `200`: `{"success": true, "new_effectiveness_score": 4.0}`
 - Errors: `400`, `401`, `403`, `404`, `409`, `422` (`rating` must be a
@@ -570,16 +697,13 @@ advances to `completed`.
 
 ### `POST /feedback-status`
 
-Auth: required. Body: `{"match_id": "...", "status": "email_sent"}`.
-`status` may only be `emailed` or `email_sent` (`completed` is reachable
-only through `POST /feedback`) — anything else is `422`.
+**Deprecated.** Auth: required. Body: `{"match_id": "...", "status": "email_sent"}`
+(`emailed` / `email_sent`, else `422`). It used to let the client mark its
+own match as sent; intros are now sent by `POST /matches/{id}/request`,
+the only way to reach `requested`, so this endpoint no longer writes and
+just reports the match's (normalised) status.
 
-Forward-only and idempotent: requesting a status the match already
-reached or passed returns `200` without changing it. Moving to
-`email_sent` also stamps `email_sent_at`.
-
-- Response `200`: `{"success": true, "match_id": "...", "status": "email_sent"}`
-  (`status` is what is stored after the call).
+- Response `200`: `{"success": true, "match_id": "...", "status": "suggested"}`
 - Errors: `401`, `403` not your match, `404` unknown match, `422`.
 
 ### `PATCH /mentor/profile`
@@ -766,14 +890,65 @@ compares the new score with the previous history entry: `up` if ≥ +5,
   `health_trend`, `health_updated_at` and appends to `health_history`;
   adds the submitter's role to the match's `health_logged_by`. `422` for
   out-of-range scores, `404` unknown match.
-- **`GET /health/cohort`** (coordinator only) →
+- **`GET /health/cohort`** (coordinator only; only the startups in the
+  coordinator's own `cohort_ids`, with users that predate tenancy counted
+  as `legacy/default`) →
   `{"startups": [{"user_id", "email", "domain", "stage", "health_score"|null, "trend", "match_count", "meeting_count", "last_activity"|null, "health_history": [{"score", "timestamp"}]}]}`
   — `domain`/`stage` from the startup's latest match profile,
   `meeting_count` = matches at `meeting_scheduled`/`completed`,
   `health_history` = last 10 points; sorted lowest score first.
-- **`GET /health/{startup_id}`** (auth; the startup itself, a coordinator,
-  or a mentor matched with that startup; `me` = the caller) →
+- **`GET /health/{startup_id}`** (auth; the startup itself, a coordinator
+  of one of its cohorts, or a mentor matched with that startup; `me` = the
+  caller) →
   `{"health_score"|null, "trend", "health_history": [...last 10], "last_updated"|null}`.
+
+### Tenancy (organizations, cohorts, invites)
+
+Collections: `organizations {slug, name, timezone}`,
+`cohorts {org_id, name, status, coordinator_user_ids}`,
+`invites {token_hash, org_id, cohort_id, role, email?, mentor_id?, max_uses, uses, expires_at, revoked_at, created_by, redeemed_by[]}`.
+Only the sha256 of an invite token is stored. Role and tenancy are read
+from the user document on every request (`get_principal` in
+`services/auth_dependency.py`), so a role change takes effect even for a
+JWT minted earlier. Users without an `org_id` fall back to `legacy/default`.
+
+- **`GET /orgs/me`** (auth) →
+  `{"org": {"org_id", "slug", "name", "timezone"}, "cohorts": [{"cohort_id", "name", "status"}]}`.
+- **`POST /cohorts/{cohort_id}/invites`** (coordinator of that cohort; `403`
+  otherwise) body `{"role", "email"?, "mentor_id"?, "max_uses"?, "expires_in_days"?}`
+  → `201` with the invite plus its one-time `token` and `url`. `startup`
+  invites are multi-use links (`max_uses` default `INVITE_LINK_DEFAULT_MAX_USES`=100,
+  TTL `INVITE_LINK_TTL_DAYS`=30). `mentor` and `coordinator` invites require
+  `email` and are single-use (TTL `INVITE_EMAIL_TTL_DAYS`=14). `mentor_id`
+  (mentor invites only) must be an unclaimed mentor (`404`/`409`).
+- **`GET /cohorts/{cohort_id}/invites`** (coordinator of that cohort) →
+  `{"invites": [{"invite_id", "role", "email", "mentor_id", "max_uses", "uses", "expires_at", "revoked_at", "created_at", "status"}]}`,
+  where `status` is `active`, `used`, `expired` or `revoked`. Tokens are never listed.
+- **`DELETE /invites/{invite_id}`** (coordinator of the invite's cohort,
+  `404` otherwise) revokes an invite. It is idempotent, and accounts already
+  created with it are unaffected.
+- **`GET /invites/{token}`** (public) →
+  `{"org_name", "org_slug", "cohort_name", "role", "email"|null, "mentor_name"|null, "expires_at"}`.
+  It returns `404` for an unknown token and `410` for a revoked, expired or used one.
+- `GET /mentors` items carry `claimed` (the mentor document has a user account).
+
+Mentor documents gain `visibility {scope: "global"|"orgs", org_ids}`, `listed`
+and `active`. New mentors default to global, listed and active. Matching
+does not filter on these yet.
+
+Scripts (run from `mentora-backend/`; both accept `--db <name>` to override
+`MONGODB_DB_NAME`):
+
+- `scripts/create_org.py --slug --name [--cohort] [--timezone] --coordinator-email [--expires-days] [--base-url]`
+  creates (or reuses) the org and cohort and prints a single-use coordinator
+  invite URL.
+- `scripts/migrate_v2.py [--dry-run] [--confirm <db>] [--keep-coordinators a@x,b@y]`
+  is idempotent. It creates `legacy/default`, backfills `org_id`,
+  `cohort_id` and `cohort_ids` on users, demotes self-registered
+  coordinators (no `invite_id`) to `startup` unless kept, backfills the
+  mentor `visibility`, `listed` and `active` fields, and then runs
+  `ensure_indexes()`. A real run requires `--confirm` to equal the target
+  database name. Run `mongodump` first.
 
 ### `GET /` and `GET /health`
 
@@ -781,27 +956,45 @@ Auth: none. `{"status": "ok", ...}` / `{"status": "healthy"}`.
 
 ## Match status lifecycle
 
-Match documents carry a `status` from this vocabulary, advanced **only
-forwards** and only for the owning user (`app/services/matches.py`):
+`app/services/matches.py` holds a `TRANSITIONS` table; `transition_match()`
+is the only writer of `status`. It checks the move against the table for
+the acting role, updates atomically (the filter includes the status it
+read, so concurrent writers can't both win) and appends
+`{from, to, by_role, by_user_id, at}` to the match's `history`.
+
+```
+suggested ──startup: request──▶ requested ──mentor: accept──▶ accepted ──startup: book──▶ meeting_scheduled
+   │  ▲                            │ ├─mentor: decline──▶ declined                         │        │
+   │  └─system: back in top 5      │ ├─startup: withdraw─▶ withdrawn                     log│  feedback│
+   ▼                               │ └─system: 7 days ───▶ expired                         ▼        ▼
+superseded (new deck)              │      (each adds a replacement suggestion)            met ──▶ completed
+```
 
 | Status | Set by | Meaning |
 |---|---|---|
-| `pending` | `POST /match` (on insert) | Matched, no outreach yet. |
-| `emailed` | `POST /email` with a `match_id` | An intro email was drafted for this match. |
-| `email_sent` | `POST /feedback-status` | The intro email was actually delivered (also sets `email_sent_at`). |
-| `accepted` | `PATCH /mentor/matches/{id}` | The mentor accepted the request. |
-| `meeting_scheduled` | `POST /calendar/book` | A Google Calendar meeting was booked (the match carries `meeting`). |
-| `completed` | `POST /feedback` | Feedback recorded; the loop is closed. |
-| `declined` | `PATCH /mentor/matches/{id}` | Terminal side-branch: the mentor declined. |
+| `suggested` | `POST /match` | In the startup's top 5; the mentor can't see it. |
+| `requested` | `POST /matches/{id}/request` (startup) | Intro email sent; waiting for the mentor. |
+| `accepted` | `PATCH /mentor/matches/{id}` (mentor) | The startup's email is now shared; it can book. |
+| `declined` | `PATCH /mentor/matches/{id}` (mentor) | Terminal; a replacement is suggested. |
+| `withdrawn` | `POST /matches/{id}/withdraw` (startup) | Terminal; a replacement is suggested. |
+| `expired` | lazily on read, after `MATCH_REQUEST_TTL_DAYS` (system) | Terminal; a replacement is suggested. |
+| `meeting_scheduled` | `POST /calendar/book` (startup) | The match carries `meeting`. |
+| `met` | first `POST /health/log` (either side) | The meeting happened. |
+| `completed` | `POST /feedback` (startup) | Rated; the mentor can still log their outcome. |
+| `superseded` | `POST /match` with a new deck (system) | Dropped out of the top 5 before any request; inactive. |
 
-`advance_match_status()` only updates a match whose current status is
-earlier in the forward list (`pending → emailed → email_sent → accepted →
-meeting_scheduled → completed`), so a status never regresses and the
-frontend's status badge / "Emails Sent" stats reflect reality; `declined`
-is never advanced from. Match documents also store `mentor_name` /
-`mentor_email` (set by `/match`; `/matches/all` and `/mentor/matches`
-backfill `mentor_name` for older documents, and `/mentor/matches` adds
-`startup_email`).
+Identity: matches are keyed on `(startup_id, mentor_id)` with one live
+document per pair (`active: true`, partial unique index
+`uniq_active_startup_mentor`); documents also carry `user_id` (owner),
+`org_id`, `cohort_id`, `profile_id`, `history[]` and, for replacements,
+`replacement_for` (the replaced `match_id`). A replacement is the best
+mentor this startup has no non-superseded match with
+(`find_matching_mentors(exclude_mentor_ids=...)`).
+
+`advance_match_status()` remains as a backward-compatible wrapper (forward
+moves only, legacy names accepted). Legacy statuses map as
+`pending` / `emailed` → `suggested` and `email_sent` → `requested`:
+`scripts/migrate_v2.py` rewrites them, and every read normalises them too.
 
 ## Scoring / matching details
 
@@ -999,26 +1192,31 @@ mentora-backend/
     routers/
       auth.py                 # POST /register, POST /login, GET /me
       extract.py              # POST /extract
-      match.py                # POST /match, POST /matches/all, GET /mentors
-      email.py                # POST /email
-      feedback.py             # POST /feedback, POST /feedback-status, GET /feedback/summary
-      mentor.py               # PATCH /mentor/profile (mentor onboarding)
+      match.py                # POST /match, GET /matches, /matches/{id}/request|withdraw, POST /matches/all, GET /mentors
+      startup.py              # /startup/me, /startup/profiles (server-side startup + profile versions)
+      email.py                # POST /email (draft only)
+      feedback.py             # POST /feedback, POST /feedback-status (deprecated), GET /feedback/summary
+      mentor.py               # PATCH /mentor/profile, GET/PATCH /mentor/matches
       evaluate.py             # POST /evaluate (retrieval metrics)
       calendar.py             # /calendar/* (Google OAuth, availability, booking)
       health.py               # /health/log, /health/cohort, /health/{startup_id}
       stats.py                # GET /dashboard/stats, GET /mentor/stats
+      orgs.py                 # /orgs/me, /cohorts/{id}/invites, /invites/* (tenancy)
     services/
       pdf_extract.py          # PyMuPDF text extraction + size cap
       llm.py                  # Groq profile extraction + deck feedback (prompt + JSON validation)
       email_gen.py            # Groq intro-email drafting
       embeddings.py           # sentence-transformers BGE wrapper (singleton)
       mentor_matching.py      # Atlas $vectorSearch query + weighted re-rank
-      matches.py              # match de-duplication + status lifecycle + enrichment
+      matches.py              # pair identity, TRANSITIONS / transition_match, replacements, lazy expiry, enrichment
+      startups.py             # startups + versioned startup_profiles, legacy backfill
+      mailer.py               # Gmail SMTP / log delivery + `outbox` audit trail
       google_calendar.py      # Google OAuth flow, token refresh, Meet event creation
       health.py               # health score formula + trend
       evaluation.py           # precision/recall/MRR/NDCG (binary + graded) metric functions
       auth.py                 # bcrypt hashing + JWT issue/verify
-      auth_dependency.py      # get_current_user bearer-token dependency
+      auth_dependency.py      # get_current_user (JWT) + get_principal (user doc + tenancy)
+      tenancy.py              # orgs/cohorts, invite tokens (sha256), atomic redemption, cohort scoping
       rate_limit.py           # in-process sliding-window rate limiting
     models/
       schemas.py              # Pydantic request/response models
@@ -1028,6 +1226,8 @@ mentora-backend/
     fixtures/eval_set.json     # graded matching eval set (synthetic labels)
     fixtures/eval_baseline.json # eval results: baseline + one run per change
   scripts/
+    create_org.py              # bootstrap an org + cohort + first coordinator invite
+    migrate_v2.py              # idempotent tenancy + lifecycle backfill (--dry-run)
     eval_matching.py           # offline matching eval (P@5, nDCG@5, MRR, spread)
     backfill_mentor_skills.py  # in-place skills + skill embeddings + re-embed
     update_vector_index.py     # create/update the Atlas vector index definition
@@ -1047,9 +1247,10 @@ mentora-backend/
   prompt for `/extract`) before failing (`500` for `/extract`, `503` for
   `/email`).
 - Rate limiting is per-process (see Security notes).
-- `/email` only *drafts* an email; delivery happens in the frontend
-  (Resend, via its `/api/send-email` route), which then calls
-  `POST /feedback-status` to move the match to `email_sent`.
+- `/email` only *drafts* an email; `POST /matches/{id}/request` delivers
+  it from the backend (Gmail SMTP, or `log` mode — see "Email").
+- Expiry of unanswered requests is lazy (applied when matches or stats
+  are read); there is no background scheduler.
 - Network calls to Groq and MongoDB Atlas only succeed once you've
   supplied real credentials in `.env` and created the Atlas Vector Search
   index described above.

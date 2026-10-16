@@ -12,6 +12,7 @@ from tests.conftest import (
     insert_match,
     me,
     register,
+    register_coordinator,
 )
 
 OTHER_STARTUP = {**STARTUP_PAYLOAD, "email": "other@example.com"}
@@ -139,7 +140,7 @@ def test_out_of_range_values_are_422(client, setup, overrides):
 def test_log_requires_party_to_the_match(client, fake_mongo, setup):
     other_startup = register(client, OTHER_STARTUP)
     other_mentor = register(client, OTHER_MENTOR)
-    coordinator = register(client, COORDINATOR_PAYLOAD)
+    coordinator = register_coordinator(client)
     for token in (other_startup, other_mentor, coordinator):
         assert _log(client, token, setup["match"]["match_id"]).status_code == 403
     assert db(fake_mongo)["meeting_notes"].count_documents({}) == 0
@@ -183,7 +184,7 @@ def test_health_history_is_capped_at_ten(client, setup):
 
 def test_health_access_rules(client, setup):
     startup_id = setup["startup"]["user_id"]
-    coordinator = register(client, COORDINATOR_PAYLOAD)
+    coordinator = register_coordinator(client)
     other_startup = register(client, OTHER_STARTUP)
     other_mentor = register(client, OTHER_MENTOR)
 
@@ -215,7 +216,7 @@ def test_cohort_lists_startups_with_activity(client, fake_mongo, setup):
     )
     _log(client, setup["startup_token"], setup["match"]["match_id"], 3, 4, True)
     register(client, OTHER_STARTUP)
-    coordinator = register(client, COORDINATOR_PAYLOAD)
+    coordinator = register_coordinator(client)
 
     response = client.get("/health/cohort", headers=auth_header(coordinator))
     assert response.status_code == 200, response.text
@@ -238,6 +239,7 @@ def test_cohort_lists_startups_with_activity(client, fake_mongo, setup):
     assert second == {
         "user_id": second["user_id"],
         "email": OTHER_STARTUP["email"],
+        "company_name": None,
         "domain": None,
         "stage": None,
         "health_score": None,

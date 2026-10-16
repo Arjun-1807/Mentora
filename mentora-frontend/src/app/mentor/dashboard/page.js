@@ -64,7 +64,7 @@ const TAB_COPY = {
   overview: { title: "Overview", description: "Your mentoring activity at a glance." },
   requests: {
     title: "Requests",
-    description: "Startups Mentora matched with your profile. Accept to let them book time with you.",
+    description: "Startups that sent you an intro. Accept to share contact details and let them book time with you.",
   },
   past: { title: "Past Meetings", description: "Startups you've accepted and met with." },
   profile: {
@@ -73,17 +73,27 @@ const TAB_COPY = {
   },
 };
 
-/** Must match GET /mentor/stats `pending_requests` (see CONTRACT). */
-const REQUEST_STATUSES = "pending,emailed,email_sent";
+/** Must match GET /mentor/stats `pending_requests`: intros waiting for an answer. */
+const REQUEST_STATUSES = "requested";
 const REQUEST_SET = new Set(REQUEST_STATUSES.split(","));
-const PAST_SET = new Set(["accepted", "meeting_scheduled", "completed"]);
+const PAST_SET = new Set(["accepted", "meeting_scheduled", "met", "completed"]);
 
 function matchKey(match) {
-  return match?._id || match?.match_id;
+  return match?.match_id || match?._id;
+}
+
+function summaryOf(match) {
+  return match?.startup_summary || match?.startup_profile || {};
 }
 
 function startupName(match) {
-  return match?.startup_profile?.domain || match?.startup_email || "this startup";
+  return match?.company_name || summaryOf(match).domain || "this startup";
+}
+
+/** "Clean Energy · MVP · Bangalore" */
+function summaryLine(match) {
+  const s = summaryOf(match);
+  return [s.domain, s.stage, s.geography].filter(Boolean).join(" · ");
 }
 
 function ratingOf(match) {
@@ -98,7 +108,7 @@ function fallbackStats(matches) {
   const ratings = matches.map(ratingOf).filter((r) => r !== null);
   const helped = new Set(
     matches
-      .filter((m) => ["meeting_scheduled", "completed"].includes(statusOf(m)))
+      .filter((m) => ["meeting_scheduled", "met", "completed"].includes(statusOf(m)))
       .map((m) => m.user_id || m.startup_email || matchKey(m))
   );
   return {
@@ -359,7 +369,7 @@ function MentorDashboard() {
       setBusy((b) => ({ ...b, [key]: decision === "accepted" ? "accept" : "decline" }));
       setRequests((prev) => prev.filter((m) => matchKey(m) !== key));
       try {
-        // PATCH /mentor/matches/{id} takes the Mongo `_id` of the match doc.
+        // PATCH /mentor/matches/{id} takes the uuid match_id (or the Mongo _id).
         await updateMentorMatchStatus(key, decision);
         toast.success(
           decision === "accepted"
@@ -527,36 +537,43 @@ function MentorDashboard() {
               <StateCard
                 icon={Users}
                 title="No pending requests"
-                description="When startups match with your profile, their requests appear here."
+                description="When a startup sends you an intro, the request appears here."
               />
             ) : (
               <ul className="space-y-3">
                 {requests.map((match, i) => {
-                  const profile = match.startup_profile || {};
+                  const profile = summaryOf(match);
                   const key = matchKey(match);
+                  const intro = match.request?.body;
                   return (
                     <li key={key || i}>
                       <MentorCard
                         variant="request"
                         index={i}
                         mentor={{
-                          name: profile.domain || match.startup_email || "Startup",
+                          // The startup's email is only shared once you accept.
+                          name: match.company_name || profile.domain || "Startup",
                           domain: profile.domain,
                           stage_focus: profile.stage,
                           expertise: Array.isArray(profile.challenges) ? profile.challenges : [],
-                          email: match.startup_email,
                         }}
                         matchScore={match.score ?? match.match_score}
                         busy={busy[key] || false}
                         onAccept={() => respond(match, "accepted")}
                         onDecline={() => respond(match, "declined")}
                       >
-                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                          {match.startup_email && <span className="break-all">{match.startup_email}</span>}
-                          <span>Matched {dateLabel(match.timestamp || match.updated_at)}</span>
-                          {Array.isArray(profile.team_gaps) && profile.team_gaps.length > 0 && (
-                            <span>Team gaps: {profile.team_gaps.slice(0, 3).join(", ")}</span>
+                        <div className="space-y-2">
+                          {intro && (
+                            <p className="line-clamp-4 whitespace-pre-line text-sm text-muted-foreground">{intro}</p>
                           )}
+                          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                            {summaryLine(match) && <span>{summaryLine(match)}</span>}
+                            <span>Requested {dateLabel(match.requested_at || match.timestamp || match.updated_at)}</span>
+                            {Array.isArray(profile.team_gaps) && profile.team_gaps.length > 0 && (
+                              <span>Team gaps: {profile.team_gaps.slice(0, 3).join(", ")}</span>
+                            )}
+                            <span>Contact details are shared once you accept.</span>
+                          </div>
                         </div>
                       </MentorCard>
                     </li>
@@ -587,7 +604,7 @@ function MentorDashboard() {
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead>Startup Domain</TableHead>
+                        <TableHead>Startup</TableHead>
                         <TableHead>Date</TableHead>
                         <TableHead>Status</TableHead>
                         <TableHead>Rating</TableHead>
@@ -598,7 +615,7 @@ function MentorDashboard() {
                         <TableRow key={matchKey(match) || i}>
                           <TableCell className="max-w-[14rem]">
                             <span className="block truncate font-medium">
-                              {match.startup_profile?.domain || "Unknown"}
+                              {match.company_name || summaryOf(match).domain || "Unknown"}
                             </span>
                             {match.startup_email && (
                               <span className="block truncate text-xs text-muted-foreground">

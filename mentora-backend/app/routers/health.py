@@ -2,9 +2,11 @@
 Startup health score endpoints (see app/services/health.py for the formula).
 
 POST /health/log           (JWT; the startup owning the match or its mentor)
-GET  /health/cohort        (JWT; coordinator only)
-GET  /health/{startup_id}  (JWT; the startup itself, a coordinator, or a
-                            mentor matched with that startup; "me" = caller)
+GET  /health/cohort        (JWT; coordinator only - startups in the
+                            coordinator's own cohorts)
+GET  /health/{startup_id}  (JWT; the startup itself, a coordinator of one of
+                            its cohorts, or a mentor matched with that
+                            startup; "me" = caller)
 
 `/health/cohort` is declared before `/health/{startup_id}` so "cohort" is
 never captured as a startup id.
@@ -17,7 +19,13 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.db.mongo import get_matches_collection, get_meeting_notes_collection, get_users_collection
+from app.db.mongo import (
+    get_matches_collection,
+    get_meeting_notes_collection,
+    get_startup_profiles_collection,
+    get_startups_collection,
+    get_users_collection,
+)
 from app.models.schemas import (
     CohortResponse,
     CohortStartup,
@@ -26,7 +34,7 @@ from app.models.schemas import (
     HealthLogResponse,
     HealthResponse,
 )
-from app.services.auth_dependency import get_current_user
+from app.services.auth_dependency import Principal, get_current_user, get_principal
 from app.services.health import (
     HISTORY_LIMIT,
     HISTORY_STORE_LIMIT,
@@ -34,7 +42,9 @@ from app.services.health import (
     compute_health_score,
     compute_trend,
 )
-from app.services.matches import MEETING_STATUSES
+from app.services import matches as match_service
+from app.services.matches import MEETING_STATUSES, VISIBLE_FILTER, normalise_status
+from app.services.tenancy import cohort_member_query, user_in_cohorts
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +150,11 @@ async def log_meeting_outcome(request: HealthLogRequest, user=Depends(get_curren
     if not match_doc:
         raise HTTPException(status_code=404, detail="Match not found.")
     submitted_by = _submitter_role(user, match_doc)
+    status = match_service.normalise_status(match_doc.get("status"))
+    if status not in match_service.OUTCOME_STATUSES:
+        raise HTTPException(
+            status_code=409, detail="An outcome can only be logged once a meeting has been scheduled."
+        )
 
     startup_id = str(match_doc.get("user_id") or "")
     startup_object_id = _object_id(startup_id)
@@ -206,29 +221,58 @@ async def log_meeting_outcome(request: HealthLogRequest, user=Depends(get_curren
             status_code=502, detail="The outcome was logged but the health score could not be updated."
         )
 
+    if status == match_service.MEETING_SCHEDULED:
+        # The first outcome log means the meeting happened.
+        try:
+            match_service.transition_match(
+                match_doc.get("match_id") or match_doc["_id"],
+                submitted_by,
+                str(user.get("sub", "")),
+                match_service.MET,
+            )
+        except match_service.TransitionError:
+            pass
+        except Exception:
+            logger.exception("Failed to mark match %s as met", match_doc.get("match_id"))
+
     return HealthLogResponse(health_score=health_score, trend=trend)
 
 
 @router.get("/health/cohort", response_model=CohortResponse)
-async def cohort_health(user=Depends(get_current_user)) -> CohortResponse:
-    """Coordinator view: every startup with its health and match activity."""
-    if user.get("role") != "coordinator":
+async def cohort_health(principal: Principal = Depends(get_principal)) -> CohortResponse:
+    """Coordinator view: the startups in the caller's cohorts, with their
+    health and match activity. Other cohorts' startups are never returned."""
+    if not principal.is_coordinator:
         raise HTTPException(status_code=403, detail="Only coordinator accounts can view the cohort.")
 
     try:
         startups = list(
             get_users_collection().find(
-                {"$or": [{"role": "startup"}, {"role": {"$exists": False}}]},
+                {
+                    "$and": [
+                        {"$or": [{"role": "startup"}, {"role": {"$exists": False}}]},
+                        cohort_member_query(principal.cohort_ids),
+                    ]
+                },
                 {"email": 1, "health_score": 1, "health_trend": 1, "health_history": 1, "health_updated_at": 1},
             )
         )
         user_ids = [str(doc["_id"]) for doc in startups]
         match_docs = list(
             get_matches_collection().find(
-                {"user_id": {"$in": user_ids}},
+                {"user_id": {"$in": user_ids}, **VISIBLE_FILTER},
                 {"user_id": 1, "status": 1, "timestamp": 1, "updated_at": 1, "startup_profile": 1},
             )
         ) if user_ids else []
+        startup_docs = {
+            doc["owner_user_id"]: doc
+            for doc in get_startups_collection().find({"owner_user_id": {"$in": user_ids}})
+        } if user_ids else {}
+        profile_ids = [d["active_profile_id"] for d in startup_docs.values() if d.get("active_profile_id")]
+        active_profiles = {
+            doc["_id"]: doc.get("profile") or {}
+            for doc in get_startup_profiles_collection().find({"_id": {"$in": profile_ids}}, {"profile": 1})
+        } if profile_ids else {}
     except Exception:
         logger.exception("Failed to load cohort health")
         raise HTTPException(status_code=502, detail="Could not load the cohort. Please try again shortly.")
@@ -249,6 +293,8 @@ async def cohort_health(user=Depends(get_current_user)) -> CohortResponse:
             default=None,
         )
         latest_profile: Dict[str, Any] = (latest or {}).get("startup_profile") or {}
+        startup_doc = startup_docs.get(user_id) or {}
+        latest_profile = active_profiles.get(startup_doc.get("active_profile_id")) or latest_profile
 
         activity = [_to_datetime(doc.get("health_updated_at"))]
         for match in user_matches:
@@ -260,12 +306,13 @@ async def cohort_health(user=Depends(get_current_user)) -> CohortResponse:
             CohortStartup(
                 user_id=user_id,
                 email=doc.get("email"),
+                company_name=startup_doc.get("company_name"),
                 domain=latest_profile.get("domain"),
                 stage=latest_profile.get("stage"),
                 health_score=float(score) if score is not None else None,
                 trend=_trend(doc),
                 match_count=len(user_matches),
-                meeting_count=sum(1 for m in user_matches if m.get("status") in MEETING_STATUSES),
+                meeting_count=sum(1 for m in user_matches if normalise_status(m.get("status")) in MEETING_STATUSES),
                 last_activity=last_activity.isoformat() if last_activity else None,
                 health_history=_history(doc),
             )
@@ -277,20 +324,44 @@ async def cohort_health(user=Depends(get_current_user)) -> CohortResponse:
 
 
 @router.get("/health/{startup_id}", response_model=HealthResponse)
-async def startup_health(startup_id: str, user=Depends(get_current_user)) -> HealthResponse:
+async def startup_health(startup_id: str, principal: Principal = Depends(get_principal)) -> HealthResponse:
     """A startup's health score, trend and last 10 history points."""
-    caller_id = str(user.get("sub", ""))
+    caller_id = principal.user_id
     target_id = caller_id if startup_id == "me" else startup_id
-    role = user.get("role")
+    role = principal.role
 
-    allowed = target_id == caller_id or role == "coordinator"
+    allowed = target_id == caller_id
+    if not allowed and role == "coordinator":
+        # Coordinators only see startups in their own cohorts. An unknown id
+        # is a 404, a startup in another cohort a 403.
+        target_oid = _object_id(target_id)
+        try:
+            target = (
+                get_users_collection().find_one(
+                    {"_id": target_oid}, {"org_id": 1, "cohort_id": 1, "cohort_ids": 1}
+                )
+                if target_oid is not None
+                else None
+            )
+        except Exception:
+            logger.exception("Failed to check coordinator access to startup %s", target_id)
+            raise HTTPException(status_code=502, detail="Could not load the health score.")
+        if target is None:
+            raise HTTPException(status_code=404, detail="Startup not found.")
+        allowed = user_in_cohorts(target, principal.cohort_ids)
     if not allowed and role == "mentor":
         mentor_id = _linked_mentor_id(caller_id)
         if mentor_id:
             try:
                 allowed = (
                     get_matches_collection().find_one(
-                        {"user_id": target_id, "mentor_id": mentor_id}, {"_id": 1}
+                        {
+                            "user_id": target_id,
+                            "mentor_id": mentor_id,
+                            # A suggestion the startup never acted on grants nothing.
+                            "status": match_service.status_in(match_service.REQUESTED_OR_LATER),
+                        },
+                        {"_id": 1},
                     )
                     is not None
                 )

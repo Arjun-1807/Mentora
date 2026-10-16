@@ -1,9 +1,16 @@
 // Pure, framework-free helpers shared by the dashboards (startup, mentor,
 // coordinator). Kept import-free so they can be unit-tested with plain node.
 
+const LEGACY_STATUS = { pending: "suggested", emailed: "suggested", email_sent: "requested" };
+
+/** A match's lifecycle status (legacy spellings mapped; default "suggested"). */
 export function statusOf(match) {
-  return String(match?.status || "pending").toLowerCase();
+  const raw = String(match?.status || "suggested").toLowerCase();
+  return LEGACY_STATUS[raw] || raw;
 }
+
+/** Statuses after which a meeting outcome can be logged. */
+export const OUTCOME_STATUSES = new Set(["meeting_scheduled", "met", "completed"]);
 
 /** Match score as an integer percentage; accepts 0–1 or 0–100. null if unknown. */
 export function scorePercent(score) {
@@ -49,11 +56,12 @@ export function meetingEnd(meeting) {
 }
 
 /**
- * Post-meeting banner rule: the meeting is scheduled, it has already ended,
- * and this role hasn't logged a health outcome for it yet.
+ * Post-meeting banner rule: a meeting was booked (meeting_scheduled, or
+ * already met / completed by the other side's log), it has ended, and this
+ * role hasn't logged a health outcome for it yet.
  */
 export function needsHealthLog(match, role, now = new Date()) {
-  if (statusOf(match) !== "meeting_scheduled") return false;
+  if (!OUTCOME_STATUSES.has(statusOf(match))) return false;
   const end = meetingEnd(match?.meeting);
   if (!end || end.getTime() > now.getTime()) return false;
   const loggedBy = Array.isArray(match?.health_logged_by) ? match.health_logged_by : [];

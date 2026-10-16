@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     MONGODB_USERS_COLLECTION: str = "users"
     MONGODB_OAUTH_STATES_COLLECTION: str = "oauth_states"
     MONGODB_MEETING_NOTES_COLLECTION: str = "meeting_notes"
+    MONGODB_ORGANIZATIONS_COLLECTION: str = "organizations"
+    MONGODB_COHORTS_COLLECTION: str = "cohorts"
+    MONGODB_INVITES_COLLECTION: str = "invites"
+    MONGODB_STARTUPS_COLLECTION: str = "startups"
+    MONGODB_STARTUP_PROFILES_COLLECTION: str = "startup_profiles"
+    MONGODB_OUTBOX_COLLECTION: str = "outbox"
 
     # Embeddings
     EMBEDDING_MODEL_NAME: str = "BAAI/bge-base-en-v1.5"
@@ -70,6 +76,25 @@ class Settings(BaseSettings):
     LOGIN_RATE_WINDOW_SECONDS: int = 300
     LLM_RATE_LIMIT: int = 20            # /extract + /email calls per window, per user
     LLM_RATE_WINDOW_SECONDS: int = 3600
+    MATCH_REQUEST_RATE_LIMIT: int = 10  # POST /matches/{id}/request per window, per user
+    MATCH_REQUEST_RATE_WINDOW_SECONDS: int = 3600
+
+    # Match lifecycle: a `requested` match nobody answered expires after this
+    # many days (checked lazily whenever matches are listed).
+    MATCH_REQUEST_TTL_DAYS: int = 7
+
+    # Outgoing email (intro requests + notifications), see app/services/mailer.py.
+    # EMAIL_DELIVERY: "smtp" sends through Gmail SMTP with GMAIL_USER and a
+    # Google App Password; "log" only records messages in the `outbox`
+    # collection. Empty (the default) means smtp when both Gmail settings are
+    # present, otherwise log.
+    EMAIL_DELIVERY: str = ""
+    GMAIL_USER: str = ""
+    GMAIL_APP_PASSWORD: str = ""
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 465
+    SMTP_TIMEOUT_SECONDS: int = 20
+    EMAIL_FROM_NAME: str = "Mentora"
 
     # Google Calendar (OAuth 2.0 web client). Leave the id/secret empty to
     # disable the calendar endpoints (they then answer 503).
@@ -81,7 +106,13 @@ class Settings(BaseSettings):
     # How long an OAuth `state` token stays valid (seconds).
     OAUTH_STATE_TTL_SECONDS: int = 15 * 60
 
-    # CORS
+    # Invites (see app/services/tenancy.py). Email-bound invites (mentor /
+    # coordinator) are single-use; startup cohort links are multi-use.
+    INVITE_EMAIL_TTL_DAYS: int = 14
+    INVITE_LINK_TTL_DAYS: int = 30
+    INVITE_LINK_DEFAULT_MAX_USES: int = 100
+
+    # CORS (also the base of the /join/<token> links handed out for invites)
     FRONTEND_ORIGIN: str = "http://localhost:3000"
 
     model_config = SettingsConfigDict(

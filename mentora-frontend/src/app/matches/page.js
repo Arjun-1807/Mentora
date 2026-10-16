@@ -1,10 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2, Search, UserSearch } from "lucide-react";
+import { Clock, FileUp, Loader2, Repeat2, Search, Undo2, UserSearch } from "lucide-react";
 import AuthGuard from "@/components/AuthGuard";
 import PageWrapper from "@/components/layout/PageWrapper";
 import MentorCard from "@/components/ui/MentorCard";
@@ -18,21 +17,13 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import EmailDialog from "@/components/matches/EmailDialog";
 import BookingSection from "@/components/matches/BookingSection";
 import MeetingCard from "@/components/matches/MeetingCard";
-import { mergeLiveStatuses, toStartupProfilePayload } from "@/components/matches/matchData";
-import { getAllMatches, matchMentors } from "@/lib/api";
-import { getStoredMatches, getStoredProfile, setStoredMatches } from "@/lib/storage";
-
-const TOP_N = 5;
-
-/** Lifecycle order, so a local update never moves a match backwards. */
-const STATUS_ORDER = ["pending", "emailed", "email_sent", "accepted", "meeting_scheduled", "completed"];
-
-function statusRank(status) {
-  const i = STATUS_ORDER.indexOf(String(status || "pending").toLowerCase());
-  return i === -1 ? 0 : i;
-}
+import { statusOf } from "@/components/dashboard/helpers";
+import { useStartupJourney } from "@/hooks/use-startup-journey";
+import { matchMentors, withdrawRequest } from "@/lib/api";
 
 const STAGE_ORDER = { idea: 0, mvp: 1, growth: 2, all: 3 };
+const CLOSED_STATUSES = new Set(["declined", "withdrawn", "expired"]);
+const MEETING_STATUSES = new Set(["meeting_scheduled", "met", "completed"]);
 
 const SORTS = [
   { value: "score", label: "Score" },
@@ -41,7 +32,8 @@ const SORTS = [
 ];
 
 function scoreOf(m) {
-  return typeof m.match_score === "number" ? m.match_score : -1;
+  const s = m.match_score ?? m.score;
+  return typeof s === "number" ? s : -1;
 }
 
 function sortMatches(list, sortBy) {
@@ -58,114 +50,113 @@ function sortMatches(list, sortBy) {
   return copy;
 }
 
-function sameMatch(a, b) {
-  return (a.match_id && a.match_id === b.match_id) || (!a.match_id && a.mentor_id === b.mentor_id);
+function StatusDetail({ match, onWithdraw, withdrawing, onBooked }) {
+  const status = statusOf(match);
+  const name = match.name || "this mentor";
+
+  if (status === "requested") {
+    return (
+      <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Clock className="h-3.5 w-3.5" aria-hidden="true" />
+          Intro sent — waiting for {name} to accept. Requests expire after 7 days.
+        </p>
+        <Button type="button" size="sm" variant="ghost" onClick={() => onWithdraw(match)} disabled={withdrawing}>
+          {withdrawing ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Undo2 aria-hidden="true" />}
+          Withdraw request
+        </Button>
+      </div>
+    );
+  }
+  if (status === "accepted") return <BookingSection match={match} onBooked={onBooked} />;
+  if (MEETING_STATUSES.has(status) && match.meeting) {
+    return (
+      <div className="mt-4">
+        <MeetingCard meeting={match.meeting} mentorName={name} />
+      </div>
+    );
+  }
+  if (CLOSED_STATUSES.has(status)) {
+    const why = {
+      declined: `${name} declined this request.`,
+      withdrawn: "You withdrew this request.",
+      expired: `${name} didn't answer within 7 days.`,
+    }[status];
+    return <p className="mt-3 text-xs text-muted-foreground">{why} We added another suggestion in its place.</p>;
+  }
+  return null;
 }
 
 function MatchesPageContent() {
-  const router = useRouter();
-  const [matches, setMatches] = useState(null);
-  const [startupProfile, setStartupProfile] = useState(null);
-  const [activeMentor, setActiveMentor] = useState(null);
+  const { profile, matches, loaded, error, reload, replaceMatch } = useStartupJourney();
+  const [activeMatch, setActiveMatch] = useState(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [rematching, setRematching] = useState(false);
-  const [error, setError] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [withdrawing, setWithdrawing] = useState(null);
   const [sortBy, setSortBy] = useState("score");
   const [query, setQuery] = useState("");
 
-  /** Overlays live status/meeting from /matches/all onto `list` and persists it. */
-  const syncLiveStatuses = useCallback(async (list) => {
-    if (!Array.isArray(list) || list.length === 0) return;
+  const runMatch = useCallback(async () => {
+    if (rematching) return;
+    setRematching(true);
+    setActionError("");
     try {
-      const live = await getAllMatches();
-      setMatches((prev) => {
-        const merged = mergeLiveStatuses(prev ?? list, live);
-        setStoredMatches(merged);
-        return merged;
-      });
-    } catch {
-      // Live statuses are a nice-to-have; the cached list still works.
-      // (Network failures already raised the "Server unavailable" toast.)
+      // Empty body: the backend matches on the active server-side profile.
+      await matchMentors();
+      reload();
+    } catch (err) {
+      setActionError(err.message || "Could not refresh your mentor matches.");
+    } finally {
+      setRematching(false);
     }
-  }, []);
+  }, [rematching, reload]);
 
-  useEffect(() => {
-    // `null` = matching never ran for this profile (vs. `[]` = ran, no hits).
-    const stored = getStoredMatches();
-    if (stored === null) {
-      toast.info("Please complete your profile first", { id: "matches-missing" });
-      router.replace("/profile");
-      return;
-    }
-    setMatches(stored);
-    setStartupProfile(getStoredProfile());
-    syncLiveStatuses(stored);
-  }, [router, syncLiveStatuses]);
-
-  const runMatch = useCallback(
-    async (profile) => {
-      if (!profile || rematching) return;
-      setRematching(true);
-      setError("");
+  const handleWithdraw = useCallback(
+    async (match) => {
+      setWithdrawing(match.match_id);
       try {
-        // /match takes a StartupProfile only — never send deck_feedback.
-        const data = await matchMentors(toStartupProfilePayload(profile));
-        const list = Array.isArray(data) ? data : data?.matches || [];
-        setStoredMatches(list);
-        setMatches(list);
-        syncLiveStatuses(list);
+        const res = await withdrawRequest(match.match_id);
+        replaceMatch(res?.match);
+        toast.success(`Request to ${match.name || "the mentor"} withdrawn.`);
+        reload(); // picks up the replacement suggestion
       } catch (err) {
-        setError(err.message || "Could not refresh your mentor matches.");
+        if (err.status !== 0) toast.error(err.message || "Could not withdraw this request.");
       } finally {
-        setRematching(false);
+        setWithdrawing(null);
       }
     },
-    [rematching, syncLiveStatuses]
+    [replaceMatch, reload]
   );
 
-  function openEmailDialog(mentor) {
-    setActiveMentor(mentor);
-    setDialogOpen(true);
-  }
-
-  const updateMatch = useCallback((target, patch) => {
-    setMatches((prev) => {
-      if (!prev) return prev;
-      const next = prev.map((m) => (sameMatch(m, target) ? { ...m, ...patch(m) } : m));
-      // Persist so the status survives a reload.
-      setStoredMatches(next);
-      return next;
-    });
-  }, []);
-
-  const markSent = useCallback(
-    (mentor) =>
-      updateMatch(mentor, (m) =>
-        statusRank(m.status) < statusRank("email_sent") ? { status: "email_sent" } : {}
-      ),
-    [updateMatch]
+  const handleSent = useCallback((updated) => replaceMatch(updated), [replaceMatch]);
+  const handleBooked = useCallback(
+    (match, meeting) => replaceMatch({ ...match, status: "meeting_scheduled", meeting }),
+    [replaceMatch]
   );
 
-  const markBooked = useCallback(
-    (match, meeting) => updateMatch(match, () => ({ status: "meeting_scheduled", meeting })),
-    [updateMatch]
-  );
+  const names = useMemo(() => {
+    const out = {};
+    for (const m of matches || []) out[m.match_id] = m.name;
+    return out;
+  }, [matches]);
 
-  const visible = useMemo(() => {
-    if (!Array.isArray(matches)) return [];
-    const top = matches.slice(0, TOP_N).map((m, i) => ({ ...m, _rank: i + 1 }));
+  const { open, closed } = useMemo(() => {
+    const list = Array.isArray(matches) ? matches : [];
     const q = query.trim().toLowerCase();
     const filtered = q
-      ? top.filter(
+      ? list.filter(
           (m) =>
-            String(m.name || "").toLowerCase().includes(q) ||
-            String(m.domain || "").toLowerCase().includes(q)
+            String(m.name || "").toLowerCase().includes(q) || String(m.domain || "").toLowerCase().includes(q)
         )
-      : top;
-    return sortMatches(filtered, sortBy);
+      : list;
+    return {
+      open: sortMatches(filtered.filter((m) => !CLOSED_STATUSES.has(statusOf(m))), sortBy),
+      closed: filtered.filter((m) => CLOSED_STATUSES.has(statusOf(m))),
+    };
   }, [matches, query, sortBy]);
 
-  if (matches === null) {
+  if (matches === null && !loaded) {
     return (
       <PageWrapper key="loading" className="max-w-4xl">
         <Skeleton className="mx-auto mb-3 h-9 w-72" />
@@ -179,41 +170,49 @@ function MatchesPageContent() {
     );
   }
 
-  if (matches.length === 0) {
+  if (loaded && error && !matches?.length) {
+    return (
+      <PageWrapper key="error" className="max-w-lg">
+        <InlineError message={error}>
+          <Button type="button" size="sm" variant="outline" onClick={reload}>
+            Try again
+          </Button>
+        </InlineError>
+      </PageWrapper>
+    );
+  }
+
+  if (loaded && !profile && !matches?.length) {
+    return (
+      <PageWrapper key="no-profile" className="max-w-lg">
+        <StateCard
+          icon={FileUp}
+          title="Upload your pitch deck first"
+          description="We match mentors to the profile we extract from your deck."
+          actions={<Button render={<Link href="/upload" />}>Upload a pitch deck</Button>}
+        />
+      </PageWrapper>
+    );
+  }
+
+  if (!matches?.length) {
     return (
       <PageWrapper key="empty" className="max-w-lg">
         <div className="space-y-4">
-          {error && (
-            <InlineError message={error}>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => runMatch(startupProfile)}
-                disabled={rematching}
-              >
-                Try again
-              </Button>
-            </InlineError>
-          )}
+          {actionError && <InlineError message={actionError} />}
           <StateCard
             icon={UserSearch}
-            title="No matches found"
-            description="Try re-uploading a more detailed deck."
+            title="No matches yet"
+            description="Run matching on your current profile, or re-upload a more detailed deck."
             actions={
               <>
-                <Button render={<Link href="/upload" />}>Re-upload deck</Button>
-                {startupProfile && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => runMatch(startupProfile)}
-                    disabled={rematching}
-                  >
-                    {rematching && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
-                    {rematching ? "Searching…" : "Search again"}
-                  </Button>
-                )}
+                <Button type="button" onClick={runMatch} disabled={rematching}>
+                  {rematching && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+                  {rematching ? "Searching…" : "Find my mentors"}
+                </Button>
+                <Button variant="outline" render={<Link href="/upload" />}>
+                  Re-upload deck
+                </Button>
               </>
             }
           />
@@ -222,25 +221,60 @@ function MatchesPageContent() {
     );
   }
 
+  const renderCard = (match, i) => {
+    const status = statusOf(match);
+    const replacedName = match.replacement_for_name || names[match.replacement_for];
+    return (
+      <MentorCard
+        key={match.match_id || match._id}
+        mentor={match}
+        matchScore={match.match_score ?? match.score}
+        index={i}
+        variant="match"
+        onEmailClick={
+          status === "suggested"
+            ? () => {
+                setActiveMatch(match);
+                setDialogOpen(true);
+              }
+            : undefined
+        }
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span>Status</span>
+            <StatusBadge status={status} />
+          </div>
+          {match.replacement_for && (
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <Repeat2 className="h-3.5 w-3.5" aria-hidden="true" />
+              Replacement for {replacedName || "an earlier match"}
+            </span>
+          )}
+        </div>
+        <StatusDetail
+          match={match}
+          onWithdraw={handleWithdraw}
+          withdrawing={withdrawing === match.match_id}
+          onBooked={handleBooked}
+        />
+      </MentorCard>
+    );
+  };
+
   return (
     <>
       <PageWrapper className="max-w-4xl">
         <div className="mb-8 text-center">
-          <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Your Top Mentor Matches</h1>
+          <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Your Mentor Matches</h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            Ranked by domain fit, stage alignment, and mentor track record.
+            Ranked by domain fit, stage alignment, and mentor track record. Send an intro to request a mentor.
           </p>
         </div>
 
-        {error && (
-          <InlineError message={error} className="mb-6">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => runMatch(startupProfile)}
-              disabled={rematching}
-            >
+        {(actionError || (error && loaded)) && (
+          <InlineError message={actionError || error} className="mb-6">
+            <Button type="button" size="sm" variant="outline" onClick={actionError ? runMatch : reload}>
               Try again
             </Button>
           </InlineError>
@@ -293,58 +327,25 @@ function MatchesPageContent() {
           </div>
         </div>
 
-        {visible.length === 0 ? (
+        {open.length === 0 && closed.length === 0 ? (
           <p className="py-16 text-center text-sm text-muted-foreground" role="status">
             No mentors match your filter.
           </p>
         ) : (
-          <div className="grid gap-5">
-            {visible.map((match, i) => {
-              const key = match.match_id || match.mentor_id || match._rank;
-              const status = String(match.status || "pending").toLowerCase();
-              const showMeeting =
-                (status === "meeting_scheduled" || status === "completed") && match.meeting;
+          <div className="grid gap-5">{open.map(renderCard)}</div>
+        )}
 
-              return (
-                <MentorCard
-                  key={key}
-                  mentor={match}
-                  matchScore={match.match_score}
-                  index={i}
-                  variant="match"
-                  onEmailClick={openEmailDialog}
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span>Status</span>
-                      <StatusBadge status={status} />
-                    </div>
-                    <span className="text-xs text-muted-foreground" aria-label={`Rank ${match._rank}`}>
-                      #{match._rank} match
-                    </span>
-                  </div>
-
-                  {status === "accepted" && (
-                    <BookingSection match={match} onBooked={markBooked} />
-                  )}
-                  {showMeeting && (
-                    <div className="mt-4">
-                      <MeetingCard meeting={match.meeting} mentorName={match.name} />
-                    </div>
-                  )}
-                </MentorCard>
-              );
-            })}
-          </div>
+        {closed.length > 0 && (
+          <section className="mt-10" aria-labelledby="closed-heading">
+            <h2 id="closed-heading" className="mb-3 text-sm font-semibold text-muted-foreground">
+              Closed requests
+            </h2>
+            <div className="grid gap-4 opacity-80">{closed.map((m, i) => renderCard(m, open.length + i))}</div>
+          </section>
         )}
 
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => runMatch(startupProfile)}
-            disabled={rematching || !startupProfile}
-          >
+          <Button type="button" variant="outline" onClick={runMatch} disabled={rematching || !profile}>
             {rematching && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
             {rematching ? "Refreshing…" : "Refresh matches"}
           </Button>
@@ -357,9 +358,8 @@ function MatchesPageContent() {
       <EmailDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
-        mentor={activeMentor}
-        startupProfile={startupProfile}
-        onSent={markSent}
+        mentor={activeMatch}
+        onSent={handleSent}
       />
     </>
   );
