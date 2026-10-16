@@ -27,6 +27,12 @@ PROFILE = StartupProfile(
 PROFILE_NO_NEEDS = PROFILE.model_copy(update={"challenges": [], "team_gaps": []})
 
 
+# Every mentor without attended ratings gets the neutral Bayesian prior
+# (3.5/5 -> 0.625), so a candidate that is "zero" on every other term still
+# scores E0.
+E0 = mm.EFFECTIVENESS_WEIGHT * mm.normalised_effectiveness()
+
+
 def _unit(index: int) -> list:
     vector = [0.0] * DIM
     vector[index] = 1.0
@@ -53,7 +59,8 @@ def _candidate(**overrides) -> dict:
 
 
 def _zero(**overrides) -> dict:
-    """A candidate that scores 0 on every term (for PROFILE_NO_NEEDS)."""
+    """A candidate that scores 0 on every term except the neutral
+    effectiveness prior E0 (for PROFILE_NO_NEEDS)."""
     fields = dict(
         score=0.0, domain="X", stage_focus="idea", geography="Berlin", effectiveness_score=None,
         skills=[], skill_embeddings=[], expertise=[],
@@ -82,9 +89,20 @@ def _score(profile, candidate) -> float:
     return match.match_score
 
 
-def test_perfect_match_scores_one(fake_vector_search):
+def _ratings(fake_mongo, mentor_id, ratings, attended=True):
+    from tests.conftest import db
+
+    feedback = db(fake_mongo)["feedback"]
+    for i, rating in enumerate(ratings):
+        feedback.insert_one({"match_id": f"{mentor_id}-{i}-{attended}", "mentor_id": mentor_id,
+                             "attended": attended, "rating": rating})
+
+
+def test_perfect_match_scores_one(fake_vector_search, fake_mongo):
+    _ratings(fake_mongo, "mentor-1", [5] * 300)
     fake_vector_search([_candidate()])
-    assert find_matching_mentors(PROFILE)[0].match_score == 1.0
+    # Effectiveness only approaches 1 as 5-star ratings accumulate.
+    assert find_matching_mentors(PROFILE)[0].match_score == pytest.approx(1.0, abs=1e-3)
 
 
 def test_each_weight_contributes_its_documented_share(fake_vector_search):
@@ -93,17 +111,16 @@ def test_each_weight_contributes_its_documented_share(fake_vector_search):
         "stage_only": (_zero(stage_focus="MVP"), mm.STAGE_MATCH_WEIGHT),
         "domain_only": (_zero(domain="Fintech"), mm.DOMAIN_MATCH_WEIGHT),
         "geography_only": (_zero(geography="San Francisco, CA"), mm.GEOGRAPHY_MATCH_WEIGHT),
-        "effectiveness_only": (_zero(effectiveness_score=5.0), mm.EFFECTIVENESS_WEIGHT),
     }
     for label, (candidate, expected) in cases.items():
         fake_vector_search([candidate])
-        assert find_matching_mentors(PROFILE_NO_NEEDS)[0].match_score == pytest.approx(expected, abs=1e-4), label
+        assert find_matching_mentors(PROFILE_NO_NEEDS)[0].match_score == pytest.approx(expected + E0, abs=1e-4), label
 
 
 def test_need_fit_contributes_its_share(fake_vector_search):
     fake_vector_search([_zero(skills=["Growth marketing", "Technical leadership"],
                               skill_embeddings=[_unit(0), _unit(1)])])
-    assert find_matching_mentors(PROFILE)[0].match_score == pytest.approx(mm.NEED_FIT_WEIGHT, abs=1e-4)
+    assert find_matching_mentors(PROFILE)[0].match_score == pytest.approx(mm.NEED_FIT_WEIGHT + E0, abs=1e-4)
 
 
 def test_weights_sum_to_one():
@@ -129,22 +146,24 @@ def test_documented_final_weights():
 def test_matching_is_case_insensitive(fake_vector_search):
     candidate = _zero(domain="  fintech ", stage_focus="mvp", geography="SAN FRANCISCO, CA")
     fake_vector_search([candidate])
-    expected = mm.DOMAIN_MATCH_WEIGHT + mm.STAGE_MATCH_WEIGHT + mm.GEOGRAPHY_MATCH_WEIGHT
+    expected = mm.DOMAIN_MATCH_WEIGHT + mm.STAGE_MATCH_WEIGHT + mm.GEOGRAPHY_MATCH_WEIGHT + E0
     assert find_matching_mentors(PROFILE_NO_NEEDS)[0].match_score == pytest.approx(expected, abs=1e-4)
 
 
 def test_missing_geography_on_either_side_scores_zero(fake_vector_search):
     fake_vector_search([_zero(geography=None)])
-    assert find_matching_mentors(PROFILE_NO_NEEDS)[0].match_score == 0.0
+    assert find_matching_mentors(PROFILE_NO_NEEDS)[0].match_score == pytest.approx(E0, abs=1e-4)
 
     fake_vector_search([_zero(geography="San Francisco, CA")])
-    assert find_matching_mentors(PROFILE_NO_NEEDS.model_copy(update={"geography": None}))[0].match_score == 0.0
+    assert find_matching_mentors(PROFILE_NO_NEEDS.model_copy(update={"geography": None}))[0].match_score == (
+        pytest.approx(E0, abs=1e-4)
+    )
 
 
 def test_raw_vector_score_is_clamped_before_calibration(fake_vector_search):
     fake_vector_search([_zero(score=17.0), _zero(_id="m2", score=-3.0)])
     scores = sorted(match.match_score for match in find_matching_mentors(PROFILE_NO_NEEDS))
-    assert scores == [0.0, pytest.approx(mm.SIMILARITY_WEIGHT)]
+    assert scores == [pytest.approx(E0, abs=1e-4), pytest.approx(mm.SIMILARITY_WEIGHT + E0, abs=1e-4)]
 
 
 def test_results_are_sorted_and_capped_at_top_k(fake_vector_search):
@@ -181,7 +200,7 @@ def test_no_candidates_returns_empty_list(fake_vector_search):
 )
 def test_preferred_stages_and_all_count_as_stage_match(fake_vector_search, overrides, matches):
     fake_vector_search([_zero(**overrides)])
-    expected = mm.STAGE_MATCH_WEIGHT if matches else 0.0
+    expected = (mm.STAGE_MATCH_WEIGHT if matches else 0.0) + E0
     assert find_matching_mentors(PROFILE_NO_NEEDS)[0].match_score == pytest.approx(expected, abs=1e-4)
 
 
@@ -214,7 +233,7 @@ def test_match_exposes_similarity_email_and_geography(fake_vector_search):
 def test_domain_synonyms_count_as_domain_match(fake_vector_search, startup_domain, mentor_domain, matches):
     fake_vector_search([_zero(domain=mentor_domain)])
     profile = PROFILE_NO_NEEDS.model_copy(update={"domain": startup_domain})
-    expected = mm.DOMAIN_MATCH_WEIGHT if matches else 0.0
+    expected = (mm.DOMAIN_MATCH_WEIGHT if matches else 0.0) + E0
     assert find_matching_mentors(profile)[0].match_score == pytest.approx(expected, abs=1e-4)
 
 
@@ -296,7 +315,7 @@ def test_need_fit_edge_cases():
 def test_mentor_without_skills_gets_the_neutral_need_fit(fake_vector_search):
     fake_vector_search([_zero()])
     assert find_matching_mentors(PROFILE)[0].match_score == pytest.approx(
-        mm.NEED_FIT_WEIGHT * mm.NEED_FIT_UNKNOWN, abs=1e-4
+        mm.NEED_FIT_WEIGHT * mm.NEED_FIT_UNKNOWN + E0, abs=1e-4
     )
 
 
@@ -315,7 +334,7 @@ def test_missing_skill_embeddings_are_computed_on_the_fly(fake_vector_search, mo
     [match] = find_matching_mentors(PROFILE)
     assert calls == [["Growth marketing"]]
     # Need 0 matches perfectly, need 1 not at all -> need_fit 0.5.
-    assert match.match_score == pytest.approx(mm.NEED_FIT_WEIGHT * 0.5, abs=1e-4)
+    assert match.match_score == pytest.approx(mm.NEED_FIT_WEIGHT * 0.5 + E0, abs=1e-4)
     assert match.reasons == ["Customer acquisition → Growth marketing"]
 
 
@@ -342,7 +361,7 @@ def test_reasons_are_returned_on_the_match(fake_vector_search):
 def test_domain_match_is_any_overlap_of_sectors(fake_vector_search, startup_sectors, startup_domain, mentor, matches):
     fake_vector_search([_zero(**mentor)])
     profile = PROFILE_NO_NEEDS.model_copy(update={"domain": startup_domain, "sectors": startup_sectors})
-    expected = mm.DOMAIN_MATCH_WEIGHT if matches else 0.0
+    expected = (mm.DOMAIN_MATCH_WEIGHT if matches else 0.0) + E0
     assert find_matching_mentors(profile)[0].match_score == pytest.approx(expected, abs=1e-4)
 
 
@@ -432,7 +451,7 @@ def test_capacity_falls_back_to_a_half_score_when_too_few_remain(fake_vector_sea
     fake_vector_search(pool)
     results = {m.mentor_id: m.match_score for m in find_matching_mentors(PROFILE_NO_NEEDS)}
     assert set(results) == {"m0", "m1", "m2", "m3", "m4"}
-    expected_unpenalised = mm.SIMILARITY_WEIGHT * mm.calibrate_similarity(0.9)
+    expected_unpenalised = mm.SIMILARITY_WEIGHT * mm.calibrate_similarity(0.9) + E0
     assert results["m0"] == pytest.approx(expected_unpenalised * mm.CAPACITY_PENALTY, abs=1e-4)
 
 
@@ -446,3 +465,45 @@ def test_unlimited_capacity_and_capacity_db_errors_never_drop_mentors(fake_vecto
 
     monkeypatch.setattr(mm, "get_matches_collection", broken)
     assert mm.recent_loads(["m0"]) == {}
+
+
+# --- Bayesian effectiveness -----------------------------------------------------
+
+def test_bayesian_effectiveness_cold_start_is_neutral():
+    assert mm.bayesian_rating(0, 0) == pytest.approx(3.5)
+    assert mm.normalised_effectiveness() == pytest.approx(0.625)
+    # (3 * 3.5 + 1) / (3 + 1) = 2.875 -> one bad rating moves a mentor only a little.
+    assert mm.bayesian_rating(1, 1) == pytest.approx(2.875)
+    assert mm.normalised_effectiveness(1, 1) == pytest.approx((2.875 - 1) / 4)
+    # Many 5-star ratings approach (but never exceed) 1.
+    assert 0.99 < mm.normalised_effectiveness(5 * 1000, 1000) < 1.0
+
+
+def test_unrated_mentor_now_outranks_a_single_one_star_mentor(fake_vector_search, fake_mongo):
+    _ratings(fake_mongo, "one-star", [1])
+    fake_vector_search([_zero(_id="one-star"), _zero(_id="new")])
+    ranked = find_matching_mentors(PROFILE_NO_NEEDS)
+    assert [m.mentor_id for m in ranked] == ["new", "one-star"]
+    assert ranked[0].match_score == pytest.approx(E0, abs=1e-4)
+    assert ranked[1].match_score == pytest.approx(
+        mm.EFFECTIVENESS_WEIGHT * mm.normalised_effectiveness(1, 1), abs=1e-4
+    )
+
+
+def test_only_attended_ratings_count(fake_vector_search, fake_mongo):
+    _ratings(fake_mongo, "m", [5, 5], attended=True)
+    _ratings(fake_mongo, "m", [1, 1, 1], attended=False)
+    assert mm.attended_rating_stats(["m", "other"]) == {"m": (10.0, 2)}
+    fake_vector_search([_zero(_id="m", effectiveness_score=1.0)])   # stored average is ignored
+    assert find_matching_mentors(PROFILE_NO_NEEDS)[0].match_score == pytest.approx(
+        mm.EFFECTIVENESS_WEIGHT * mm.normalised_effectiveness(10, 2), abs=1e-4
+    )
+
+
+def test_rating_lookup_failure_falls_back_to_the_prior(fake_vector_search, monkeypatch):
+    def broken():
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(mm, "get_feedback_collection", broken)
+    fake_vector_search([_zero()])
+    assert find_matching_mentors(PROFILE_NO_NEEDS)[0].match_score == pytest.approx(E0, abs=1e-4)

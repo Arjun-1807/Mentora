@@ -22,7 +22,7 @@ import numpy as np
 from fastapi import HTTPException
 
 from app.config import settings
-from app.db.mongo import get_matches_collection, get_mentors_collection
+from app.db.mongo import get_feedback_collection, get_matches_collection, get_mentors_collection
 from app.models.schemas import MentorMatch, StartupProfile
 from app.services.matches import CAPACITY_LOAD_STATUSES
 from app.services.embeddings import build_startup_profile_text, embed_passages, embed_queries, embed_query
@@ -93,6 +93,15 @@ CAPACITY_PENALTY = 0.5
 MIN_ELIGIBLE_BEFORE_FALLBACK = 5
 # max_startups_per_month values ("1", "2", "3", "5+") -> monthly capacity.
 CAPACITY_BY_SETTING = {"1": 1, "2": 2, "3": 3, "5+": 8}
+# ---------------------------------------------------------------------------
+
+# --- Bayesian effectiveness -------------------------------------------------
+# rating = (C*m + sum of ratings) / (C + n) over feedback where the meeting
+# was attended, so a mentor with no ratings sits at the prior mean m (3.5/5,
+# normalised to 0.625) instead of 0, and one 1-star rating moves them only
+# a little. Normalised onto [0, 1] as (rating - 1) / 4.
+EFFECTIVENESS_PRIOR_COUNT = 3     # C
+EFFECTIVENESS_PRIOR_MEAN = 3.5    # m
 # ---------------------------------------------------------------------------
 
 # Stage value meaning "mentors startups at any stage".
@@ -337,6 +346,40 @@ def apply_eligibility(candidates: List[dict], now: Optional[datetime] = None) ->
     return onboarded, full
 
 
+# --- effectiveness ------------------------------------------------------------
+
+def bayesian_rating(rating_sum: float, rating_count: int) -> float:
+    """Bayesian-average 1-5 rating with prior EFFECTIVENESS_PRIOR_MEAN
+    weighted as EFFECTIVENESS_PRIOR_COUNT ratings."""
+    c, m = EFFECTIVENESS_PRIOR_COUNT, EFFECTIVENESS_PRIOR_MEAN
+    return (c * m + float(rating_sum)) / (c + int(rating_count))
+
+
+def normalised_effectiveness(rating_sum: float = 0.0, rating_count: int = 0) -> float:
+    """Bayesian rating mapped from 1-5 onto 0-1 (no ratings -> 0.625)."""
+    return max(0.0, min(1.0, (bayesian_rating(rating_sum, rating_count) - 1.0) / 4.0))
+
+
+def attended_rating_stats(mentor_ids: Sequence[str]) -> Dict[str, Tuple[float, int]]:
+    """Per mentor id, (sum, count) of numeric ratings from feedback where the
+    startup attended the meeting - one aggregation for all candidates. A
+    database failure is logged and every mentor is treated as unrated."""
+    if not mentor_ids:
+        return {}
+    pipeline = [
+        {"$match": {"mentor_id": {"$in": list(mentor_ids)}, "attended": True, "rating": {"$type": "number"}}},
+        {"$group": {"_id": "$mentor_id", "total": {"$sum": "$rating"}, "count": {"$sum": 1}}},
+    ]
+    try:
+        return {
+            str(row["_id"]): (float(row["total"]), int(row["count"]))
+            for row in get_feedback_collection().aggregate(pipeline)
+        }
+    except Exception:
+        logger.exception("Failed to aggregate mentor ratings; using the neutral prior for this request")
+        return {}
+
+
 NO_MENTORS_MESSAGE = "No mentor profiles found. Please seed the database."
 
 
@@ -429,6 +472,7 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
     needs = startup_needs(profile)
     need_vectors = np.asarray(embed_queries(needs), dtype=float) if needs else None
     skill_matrices = _skill_matrices(candidates)
+    rating_stats = attended_rating_stats([str(c.get("_id", "")) for c in candidates])
 
     profile_stage = (profile.stage or "").strip().lower()
     profile_geography = (profile.geography or "").strip().lower()
@@ -440,7 +484,6 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
         need_fit, reasons = compute_need_fit(needs, need_vectors, mentor_skills(candidate), skill_matrix)
 
         candidate_geography = (candidate.get("geography") or "").strip().lower()
-        candidate_effectiveness = candidate.get("effectiveness_score")
 
         stage_match = (
             1.0
@@ -451,7 +494,9 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
         geography_match = (
             1.0 if profile_geography and candidate_geography and candidate_geography == profile_geography else 0.0
         )
-        effectiveness_score_normalized = (candidate_effectiveness or 0.0) / 5.0
+        effectiveness_score_normalized = normalised_effectiveness(
+            *rating_stats.get(str(candidate.get("_id", "")), (0.0, 0))
+        )
 
         final_score = (
             similarity * SIMILARITY_WEIGHT

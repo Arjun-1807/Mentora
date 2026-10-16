@@ -167,19 +167,20 @@ def _write_baseline_file(data: dict) -> None:
 
 
 def _print_table(result: dict, stored: dict) -> None:
-    columns = []
+    """One row per stored run (baseline first) plus the current run."""
+    rows = []
     if stored.get("baseline"):
-        columns.append(("baseline", stored["baseline"]["metrics"]))
+        rows.append(("baseline", stored["baseline"]["metrics"]))
     for name, run in (stored.get("runs") or {}).items():
-        columns.append((name, run["metrics"]))
-    columns.append(("current", result["metrics"]))
+        rows.append((name, run["metrics"]))
+    rows.append(("current", result["metrics"]))
 
-    width = max([16] + [len(name) + 2 for name, _ in columns])
-    header = f"{'metric':12s}" + "".join(f"{name:>{width}s}" for name, _ in columns)
+    label_width = max(len(name) for name, _ in rows) + 2
+    header = f"{'run':{label_width}s}" + "".join(f"{metric:>13s}" for metric in METRICS)
     print(header)
     print("-" * len(header))
-    for metric in METRICS:
-        print(f"{metric:12s}" + "".join(f"{values.get(metric, float('nan')):>{width}.4f}" for _, values in columns))
+    for name, values in rows:
+        print(f"{name:{label_width}s}" + "".join(f"{values.get(metric, float('nan')):>13.4f}" for metric in METRICS))
 
 
 def main() -> int:
