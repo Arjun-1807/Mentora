@@ -202,6 +202,13 @@ def test_match_exposes_similarity_email_and_geography(fake_vector_search):
         ("FinTech", "Fintech", True),
         ("Climate Tech", "HealthTech", False),
         ("Climate Tech", "", False),
+        # Seed-domain labels map onto the MentorSector vocabulary.
+        ("D2C", "E-commerce", True),
+        ("DeepTech", "AI/ML", True),
+        ("InsurTech", "FinTech", True),
+        ("Logistics", "Supply Chain", True),
+        ("Gaming", "gaming", True),          # unknown labels still match themselves
+        ("Others", "Others", False),         # the catch-all never matches
     ],
 )
 def test_domain_synonyms_count_as_domain_match(fake_vector_search, startup_domain, mentor_domain, matches):
@@ -316,3 +323,34 @@ def test_reasons_are_returned_on_the_match(fake_vector_search):
     fake_vector_search([_candidate()])
     [match] = find_matching_mentors(PROFILE)
     assert match.reasons == ["Customer acquisition → Growth marketing", "No CTO → Technical leadership"]
+
+
+# --- any-sector domain match ----------------------------------------------------
+
+@pytest.mark.parametrize(
+    "startup_sectors, startup_domain, mentor, matches",
+    [
+        # Startup's second sector overlaps the mentor's domain.
+        (["AgriTech", "FinTech"], "AgriTech", {"domain": "Fintech"}, True),
+        # Mentor's second sector_expertise overlaps the startup's domain.
+        ([], "SaaS", {"domain": "FinTech", "sector_expertise": ["FinTech", "SaaS"]}, True),
+        (["HealthTech", "SaaS"], "HealthTech", {"domain": "X", "sector_expertise": ["SaaS"]}, True),
+        (["AgriTech"], "AgriTech", {"domain": "FinTech", "sector_expertise": ["FinTech", "EdTech"]}, False),
+        (["Others"], "Others", {"domain": "Others", "sector_expertise": ["Others"]}, False),
+    ],
+)
+def test_domain_match_is_any_overlap_of_sectors(fake_vector_search, startup_sectors, startup_domain, mentor, matches):
+    fake_vector_search([_zero(**mentor)])
+    profile = PROFILE_NO_NEEDS.model_copy(update={"domain": startup_domain, "sectors": startup_sectors})
+    expected = mm.DOMAIN_MATCH_WEIGHT if matches else 0.0
+    assert find_matching_mentors(profile)[0].match_score == pytest.approx(expected, abs=1e-4)
+
+
+def test_canonical_domain_maps_onto_mentor_sectors():
+    assert mm.canonical_domain("Climate Tech") == "Clean Energy"
+    assert mm.canonical_domain("AI/ML") == "DeepTech"
+    assert mm.canonical_domain("E-commerce") == "D2C"
+    assert mm.canonical_domain("Fintech") == "FinTech"
+    assert mm.canonical_domain("Logistics") == "Logistics"
+    assert mm.canonical_domain(" Gaming ") == "gaming"
+    assert mm.canonical_domain(None) == ""

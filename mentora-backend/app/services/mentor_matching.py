@@ -79,30 +79,65 @@ TOP_K_RESULTS = 5
 # Stage value meaning "mentors startups at any stage".
 ALL_STAGES = "all"
 
-# Synonym groups for domain_match. The LLM extraction prompt suggests labels
-# like "Climate Tech" while mentor onboarding offers "Clean Energy", so an
-# exact string compare would never credit those mentors for climate decks.
-# Keys are normalised (lowercase, alphanumerics only); values are canonical.
+# Synonym groups for domain_match, mapping every label we see onto the
+# MentorSector vocabulary of mentor onboarding (app/models/schemas.py): the
+# LLM used to answer "Climate Tech" / "AI/ML" / "E-commerce", the seeded
+# mentors use those labels too, while onboarded mentors pick "Clean Energy" /
+# "DeepTech" / "D2C". Keys are normalised (lowercase, alphanumerics only);
+# values are the MentorSector labels.
 _DOMAIN_SYNONYMS = {
     **dict.fromkeys(
-        ["cleanenergy", "climatetech", "climate", "cleantech", "greentech", "renewableenergy", "renewables"],
-        "clean energy",
+        ["cleanenergy", "climatetech", "climate", "cleantech", "greentech", "renewableenergy", "renewables",
+         "energy", "ev", "electricvehicles", "sustainability"],
+        "Clean Energy",
     ),
-    **dict.fromkeys(["fintech", "financialtechnology"], "fintech"),
-    **dict.fromkeys(["healthtech", "healthcare", "medtech"], "healthtech"),
-    **dict.fromkeys(["edtech", "education", "educationtechnology"], "edtech"),
-    **dict.fromkeys(["agritech", "agtech", "agriculture"], "agritech"),
-    **dict.fromkeys(["ecommerce", "eretail"], "e-commerce"),
-    **dict.fromkeys(["saas", "b2bsaas"], "saas"),
-    **dict.fromkeys(["aiml", "ai", "artificialintelligence", "machinelearning"], "ai/ml"),
+    **dict.fromkeys(
+        ["fintech", "financialtechnology", "insurtech", "insurance", "wealthtech", "lending", "payments",
+         "regtech", "neobanking", "crypto", "web3"],
+        "FinTech",
+    ),
+    **dict.fromkeys(["healthtech", "healthcare", "medtech", "digitalhealth", "healthtechnology"], "HealthTech"),
+    **dict.fromkeys(["edtech", "education", "educationtechnology", "edutech"], "EdTech"),
+    **dict.fromkeys(["agritech", "agtech", "agriculture", "foodtech", "agrifoodtech"], "AgriTech"),
+    **dict.fromkeys(
+        ["d2c", "directtoconsumer", "ecommerce", "eretail", "retail", "consumer", "consumerbrands",
+         "quickcommerce", "qcommerce"],
+        "D2C",
+    ),
+    **dict.fromkeys(["saas", "b2bsaas", "software", "enterprisesoftware", "devtools"], "SaaS"),
+    **dict.fromkeys(
+        ["deeptech", "aiml", "ai", "artificialintelligence", "machinelearning", "ml", "robotics", "quantum",
+         "semiconductors", "spacetech", "hardware"],
+        "DeepTech",
+    ),
+    **dict.fromkeys(["logistics", "supplychain", "freight", "shipping", "transportation"], "Logistics"),
+    **dict.fromkeys(["others", "other"], "Others"),
 }
+# A catch-all label carries no signal: two "Others" never count as a match.
+_NON_MATCHING_SECTORS = {"", "Others"}
 
 
 def canonical_domain(domain: Optional[str]) -> str:
-    """Normalise a domain label so synonyms compare equal ("" if blank)."""
+    """Normalise a domain label onto the MentorSector vocabulary so synonyms
+    compare equal; unknown labels come back lower-cased ("" if blank)."""
     raw = (domain or "").strip().lower()
     key = "".join(ch for ch in raw if ch.isalnum())
     return _DOMAIN_SYNONYMS.get(key, raw)
+
+
+def canonical_sectors(labels: Iterable[Optional[str]]) -> set:
+    """Canonical, matchable sectors of a list of labels (blank/Others dropped)."""
+    return {canonical_domain(label) for label in labels if label} - _NON_MATCHING_SECTORS
+
+
+def _domain_matches(profile: StartupProfile, candidate: Dict[str, Any]) -> bool:
+    """True if any of the startup's sectors (or its domain) overlaps any of
+    the mentor's sector_expertise or domain, after canonical_domain()."""
+    startup = canonical_sectors(list(getattr(profile, "sectors", None) or []) + [profile.domain])
+    mentor_labels = candidate.get("sector_expertise")
+    mentor_labels = list(mentor_labels) if isinstance(mentor_labels, (list, tuple)) else []
+    mentor = canonical_sectors(mentor_labels + [candidate.get("domain")])
+    return bool(startup & mentor)
 
 
 def calibrate_similarity(vector_search_score: float) -> float:
@@ -150,13 +185,11 @@ def mentor_skills(candidate: Dict[str, Any]) -> List[str]:
     skills = [str(s).strip() for s in (candidate.get("skills") or []) if str(s or "").strip()]
     if skills:
         return skills
-    sectors = {canonical_domain(s) for s in (candidate.get("sector_expertise") or [])}
-    sectors.add(canonical_domain(candidate.get("domain")))
-    return [
-        str(e).strip()
-        for e in (candidate.get("expertise") or [])
-        if str(e or "").strip() and canonical_domain(str(e)) not in sectors and canonical_domain(str(e)) not in _DOMAIN_SYNONYMS.values()
-    ]
+    sector_like = {canonical_domain(s) for s in (candidate.get("sector_expertise") or [])}
+    sector_like.add(canonical_domain(candidate.get("domain")))
+    sector_like.update(_DOMAIN_SYNONYMS.values())
+    expertise = [str(e).strip() for e in (candidate.get("expertise") or []) if str(e or "").strip()]
+    return [e for e in expertise if canonical_domain(e) not in sector_like]
 
 
 def _skill_matrices(candidates: Sequence[Dict[str, Any]]) -> List[Optional[np.ndarray]]:
@@ -309,7 +342,6 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
     need_vectors = np.asarray(embed_queries(needs), dtype=float) if needs else None
     skill_matrices = _skill_matrices(candidates)
 
-    profile_domain = canonical_domain(profile.domain)
     profile_stage = (profile.stage or "").strip().lower()
     profile_geography = (profile.geography or "").strip().lower()
 
@@ -319,7 +351,6 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
         similarity = calibrate_similarity(raw_score)
         need_fit, reasons = compute_need_fit(needs, need_vectors, mentor_skills(candidate), skill_matrix)
 
-        candidate_domain = canonical_domain(candidate.get("domain"))
         candidate_geography = (candidate.get("geography") or "").strip().lower()
         candidate_effectiveness = candidate.get("effectiveness_score")
 
@@ -328,7 +359,7 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
             if _stage_matches(profile_stage, candidate.get("stage_focus"), candidate.get("preferred_stages"))
             else 0.0
         )
-        domain_match = 1.0 if candidate_domain and candidate_domain == profile_domain else 0.0
+        domain_match = 1.0 if _domain_matches(profile, candidate) else 0.0
         geography_match = (
             1.0 if profile_geography and candidate_geography and candidate_geography == profile_geography else 0.0
         )

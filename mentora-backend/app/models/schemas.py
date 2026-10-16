@@ -51,9 +51,10 @@ MentorAvailability = Literal["Weekdays", "Weekends", "Flexible"]
 
 MAX_BIO_LENGTH = 300
 MAX_PAST_EXITS_LENGTH = 300
-# Phase 4 (matching quality): mentor skills limits.
+# Phase 4 (matching quality): mentor skills / startup sectors limits.
 MAX_MENTOR_SKILLS = 15
 MAX_MENTOR_SKILL_LENGTH = 80
+MAX_STARTUP_SECTORS = 2
 
 # Minimum password length enforced at registration.
 MIN_PASSWORD_LENGTH = 8
@@ -69,6 +70,16 @@ class StartupProfile(BaseModel):
     challenges: List[str] = Field(default_factory=list, description="Key challenges the startup is facing")
     team_gaps: List[str] = Field(default_factory=list, description="Skill/role gaps in the founding team")
     geography: Optional[str] = Field(default=None, description="Startup's geography, e.g. 'San Francisco, CA'")
+    # Phase 4 (matching quality): up to MAX_STARTUP_SECTORS MentorSector
+    # labels; `domain` stays the first one for backward compatibility.
+    sectors: List[str] = Field(
+        default_factory=list, description="Up to 2 sectors from the MentorSector vocabulary, best first"
+    )
+
+    @field_validator("sectors", mode="before")
+    @classmethod
+    def _cap_sectors(cls, value: Any) -> List[str]:
+        return _coerce_str_list(value)[:MAX_STARTUP_SECTORS]
 
 
 MAX_IMPROVEMENT_TIPS = 3
