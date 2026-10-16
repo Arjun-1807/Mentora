@@ -72,6 +72,53 @@ npm install
 npm run dev
 ```
 
+## Tenancy: organizations, cohorts and invites
+
+Mentora is invite-only per incubator. An **organization** (the incubator)
+has **cohorts**; startups, mentors and coordinators join a cohort through an
+**invite link** (`/join/<token>`):
+
+| Invite | Uses | Bound to an email | Who creates it |
+|---|---|---|---|
+| Startup cohort link | many (default 100), revocable | no | a coordinator of the cohort |
+| Mentor invite | one | yes (optionally claims an existing seeded mentor profile) | a coordinator |
+| Coordinator invite | one | yes | `scripts/create_org.py` or a coordinator |
+
+- **Coordinators are invite-only.** `POST /register` with `role: "coordinator"`
+  and no valid coordinator invite answers `403`.
+- A coordinator only sees the startups in their own cohorts
+  (`/health/cohort`, `/health/{id}`).
+- Startups and mentors can still sign up without an invite at `/register`;
+  they land in the built-in `legacy` org's `default` cohort.
+- Mentors remain one shared, global pool. Each mentor document has
+  `visibility {scope: "global" | "orgs", org_ids}`, plus `listed` and
+  `active` flags.
+
+**Bootstrap an org** (from `mentora-backend/`, with the venv active):
+
+```bash
+python scripts/create_org.py --slug acme-labs --name "Acme Labs" \
+    --cohort "Spring 2027" --coordinator-email lead@acmelabs.org
+# -> Invite URL:  http://localhost:3000/join/<token>
+```
+
+The coordinator opens that link and registers (the email is fixed by the
+invite). They then go to **Cohort Overview → Invites** to create the
+startup link and the mentor and coordinator invites, copy them, and revoke
+them. Each link is shown only once, because the database stores only a
+sha256 of the token.
+
+**Upgrading an existing database.** `scripts/migrate_v2.py` is idempotent.
+It backfills the `legacy` org and `default` cohort on existing users, demotes
+self-registered coordinators to `startup` (except those listed in
+`--keep-coordinators`), and sets the mentor visibility defaults. Take a
+`mongodump` first and preview with `--dry-run`:
+
+```bash
+python scripts/migrate_v2.py --db mentora --dry-run
+python scripts/migrate_v2.py --db mentora --confirm mentora --keep-coordinators lead@acmelabs.org
+```
+
 Sample pitch decks for trying the flow end to end live in
 [`mentora-backend/test_decks/`](./mentora-backend/test_decks).
 

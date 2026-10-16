@@ -20,7 +20,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { getUserEmail, getUserRole } from "@/lib/storage";
 
 /** Routes that render their own chrome (sidebar shells, split-screen auth). */
-const HIDDEN_PREFIXES = ["/dashboard", "/mentor/dashboard", "/login", "/register"];
+const HIDDEN_PREFIXES = ["/dashboard", "/mentor/dashboard", "/login", "/register", "/join"];
 
 const ROLE_LINKS = {
   startup: [
