@@ -51,6 +51,18 @@ def get_meeting_notes_collection() -> Collection:
     return get_database()[settings.MONGODB_MEETING_NOTES_COLLECTION]
 
 
+def get_organizations_collection() -> Collection:
+    return get_database()[settings.MONGODB_ORGANIZATIONS_COLLECTION]
+
+
+def get_cohorts_collection() -> Collection:
+    return get_database()[settings.MONGODB_COHORTS_COLLECTION]
+
+
+def get_invites_collection() -> Collection:
+    return get_database()[settings.MONGODB_INVITES_COLLECTION]
+
+
 def _safe_create_index(collection: Collection, keys: list, **kwargs) -> None:
     """Create one index, logging (not raising) on failure.
 
@@ -86,6 +98,11 @@ def ensure_indexes() -> None:
                                       (the callback also checks the age).
     - meeting_notes (startup_id, timestamp) -> health score computation.
     - meeting_notes.match_id       -> per-match note lookups.
+    - organizations.slug    unique -> one org per slug (e.g. "legacy").
+    - cohorts (org_id, name) unique -> one cohort per name within an org.
+    - invites.token_hash    unique -> invite lookup by sha256(token).
+    - invites (cohort_id, created_at) -> coordinator invite listing.
+    - users.cohort_ids             -> coordinator cohort scoping.
     """
     users = get_users_collection()
     matches = get_matches_collection()
@@ -128,6 +145,23 @@ def ensure_indexes() -> None:
     )
     _safe_create_index(meeting_notes, [("match_id", ASCENDING)], name="match_id")
 
+    _safe_create_index(users, [("cohort_ids", ASCENDING)], name="cohort_ids")
+    _safe_create_index(
+        get_organizations_collection(), [("slug", ASCENDING)], unique=True, name="uniq_slug"
+    )
+    _safe_create_index(
+        get_cohorts_collection(),
+        [("org_id", ASCENDING), ("name", ASCENDING)],
+        unique=True,
+        name="uniq_org_name",
+    )
+    invites = get_invites_collection()
+    _safe_create_index(invites, [("token_hash", ASCENDING)], unique=True, name="uniq_token_hash")
+    _safe_create_index(
+        invites, [("cohort_id", ASCENDING), ("created_at", DESCENDING)], name="cohort_id_created_at"
+    )
+
     logger.info(
-        "MongoDB index creation attempted for users/matches/feedback/oauth_states/meeting_notes"
+        "MongoDB index creation attempted for users/matches/feedback/oauth_states/meeting_notes/"
+        "organizations/cohorts/invites"
     )

@@ -14,6 +14,7 @@ from tests.conftest import (
     insert_match,
     me,
     register,
+    register_coordinator,
     seed_mentor,
 )
 
@@ -21,7 +22,7 @@ from tests.conftest import (
 # --- coordinator role ---------------------------------------------------------
 
 def test_coordinator_can_register_login_and_me(client):
-    token = register(client, COORDINATOR_PAYLOAD)
+    token = register_coordinator(client)
     profile = me(client, token)
     assert profile["role"] == "coordinator"
     assert profile["profile"] == {}

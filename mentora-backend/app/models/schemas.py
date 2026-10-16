@@ -195,6 +195,9 @@ class MentorListItem(BaseModel):
     email: Optional[str] = None
     effectiveness_score: Optional[float] = None
     feedback_count: int = 0
+    claimed: bool = Field(
+        default=False, description="True once a user account owns this mentor document"
+    )
 
 
 class MentorListResponse(BaseModel):
@@ -421,6 +424,12 @@ class RegisterRequest(BaseModel):
     password: str = Field(..., min_length=MIN_PASSWORD_LENGTH)
     role: UserRole
     profile: Dict = Field(default_factory=dict, description="Free-form profile data; see auth.py for expected keys")
+    invite_token: Optional[str] = Field(
+        default=None,
+        max_length=256,
+        description="Token from a /join/<token> invite link. Required for coordinators; "
+        "startups/mentors without one land in the legacy org.",
+    )
 
     @field_validator("password")
     @classmethod
@@ -458,6 +467,9 @@ class MeResponse(BaseModel):
     calendar_connected: bool = Field(
         default=False, description="True once the user has connected Google Calendar"
     )
+    org_id: Optional[str] = None
+    cohort_id: Optional[str] = None
+    cohort_ids: List[str] = Field(default_factory=list)
 
 
 # --- Google Calendar ---------------------------------------------------------
@@ -618,3 +630,96 @@ class MentorStatsResponse(BaseModel):
     accepted: int
     avg_rating: Optional[float] = None
     total_helped: int
+
+
+# --- Tenancy: organizations, cohorts, invites (Phase 1) -------------------------
+
+InviteRole = Literal["startup", "mentor", "coordinator"]
+InviteStatus = Literal["active", "used", "expired", "revoked"]
+
+
+class InviteCreateRequest(BaseModel):
+    """POST /cohorts/{cohort_id}/invites.
+
+    * startup     -> multi-use cohort link (`max_uses`, default from settings),
+                     `email` optional (binds it to one address if given).
+    * mentor      -> single-use, `email` required; `mentor_id` optionally lets
+                     the invitee claim an existing (seeded) mentor document.
+    * coordinator -> single-use, `email` required.
+    """
+
+    role: InviteRole
+    email: Optional[EmailStr] = None
+    mentor_id: Optional[str] = Field(default=None, max_length=64)
+    max_uses: Optional[int] = Field(default=None, ge=1, le=1000)
+    expires_in_days: Optional[int] = Field(default=None, ge=1, le=90)
+
+    @model_validator(mode="after")
+    def _check_role_rules(self) -> "InviteCreateRequest":
+        if self.role in ("mentor", "coordinator") and not self.email:
+            raise ValueError(f"{self.role} invites must be bound to an email address")
+        if self.mentor_id and self.role != "mentor":
+            raise ValueError("mentor_id is only allowed on mentor invites")
+        if self.role != "startup" and self.max_uses not in (None, 1):
+            raise ValueError(f"{self.role} invites are single-use")
+        return self
+
+
+class InviteOut(BaseModel):
+    """An invite as shown to coordinators. Never includes the token hash."""
+
+    invite_id: str
+    org_id: str
+    cohort_id: str
+    role: InviteRole
+    email: Optional[str] = None
+    mentor_id: Optional[str] = None
+    max_uses: int
+    uses: int
+    expires_at: Optional[str] = None
+    revoked_at: Optional[str] = None
+    created_at: Optional[str] = None
+    status: InviteStatus
+
+
+class InviteCreateResponse(InviteOut):
+    """Returned once, at creation: the raw token and the shareable link."""
+
+    token: str
+    url: str
+
+
+class InviteListResponse(BaseModel):
+    invites: List[InviteOut]
+
+
+class InvitePreviewResponse(BaseModel):
+    """GET /invites/{token}: public, no secrets."""
+
+    org_name: str
+    org_slug: str
+    cohort_name: str
+    role: InviteRole
+    email: Optional[str] = None
+    mentor_name: Optional[str] = None
+    expires_at: Optional[str] = None
+
+
+class CohortOut(BaseModel):
+    cohort_id: str
+    name: str
+    status: str = "active"
+
+
+class OrgOut(BaseModel):
+    org_id: str
+    slug: str
+    name: str
+    timezone: Optional[str] = None
+
+
+class MyOrgResponse(BaseModel):
+    """GET /orgs/me: the caller's org and the cohorts they belong to."""
+
+    org: OrgOut
+    cohorts: List[CohortOut]

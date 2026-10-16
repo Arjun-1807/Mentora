@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     MONGODB_USERS_COLLECTION: str = "users"
     MONGODB_OAUTH_STATES_COLLECTION: str = "oauth_states"
     MONGODB_MEETING_NOTES_COLLECTION: str = "meeting_notes"
+    MONGODB_ORGANIZATIONS_COLLECTION: str = "organizations"
+    MONGODB_COHORTS_COLLECTION: str = "cohorts"
+    MONGODB_INVITES_COLLECTION: str = "invites"
 
     # Embeddings
     EMBEDDING_MODEL_NAME: str = "BAAI/bge-base-en-v1.5"
@@ -81,7 +84,13 @@ class Settings(BaseSettings):
     # How long an OAuth `state` token stays valid (seconds).
     OAUTH_STATE_TTL_SECONDS: int = 15 * 60
 
-    # CORS
+    # Invites (see app/services/tenancy.py). Email-bound invites (mentor /
+    # coordinator) are single-use; startup cohort links are multi-use.
+    INVITE_EMAIL_TTL_DAYS: int = 14
+    INVITE_LINK_TTL_DAYS: int = 30
+    INVITE_LINK_DEFAULT_MAX_USES: int = 100
+
+    # CORS (also the base of the /join/<token> links handed out for invites)
     FRONTEND_ORIGIN: str = "http://localhost:3000"
 
     model_config = SettingsConfigDict(
