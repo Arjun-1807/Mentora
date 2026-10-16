@@ -1,0 +1,1201 @@
+{
+  "version": 1,
+  "description": "Offline evaluation set for mentor matching (scripts/eval_matching.py). SYNTHETIC labels written by the developer, not by incubator coordinators: use them to compare ranking changes against each other, not as a measure of real-world match quality. Replace/extend with coordinator-graded labels once a pilot runs.",
+  "judged_mentors_note": "Labels cover only the 15 seeded mentors (seed_mentors.py, fake @mentors.mentora.dev emails). Mentors outside this list (real accounts created through /register) are UNJUDGED: the eval script removes them from the ranking before computing metrics (condensed-list evaluation), so the numbers do not depend on which real accounts happen to exist in the database.",
+  "rubric": {
+    "inputs": "Per profile the labeller hand-assigns judged_sectors (seed-domain vocabulary; synonyms such as D2C=E-commerce, InsurTech=Fintech, DeepTech robotics=AI/ML resolved by judgement) and need_tags: which of the seed expertise areas the startup's challenges/team gaps actually call for. Labels use only the seed mentors' domain, stage_focus and expertise as they were BEFORE the Phase 4 changes (no skills field), so later changes to the seed data cannot leak into the labels.",
+    "definitions": {
+      "stage_distance": "0 = same stage, 1 = adjacent (idea-MVP, MVP-growth), 2 = idea-growth",
+      "N": "number of the mentor's expertise areas that appear in need_tags"
+    },
+    "grade_2": "highly relevant: sector fit AND ((stage_distance 0 AND N >= 1) OR (stage_distance 1 AND N >= 2))",
+    "grade_1": "partially relevant: any other sector-fit mentor; OR no sector fit but N >= 2 and stage_distance <= 1",
+    "grade_0": "not relevant: everything else (omitted from `relevance`)",
+    "overrides": "a few rubric outputs were changed by hand; each carries a reason in label_overrides",
+    "metrics": "P@5 counts grade >= 1 as relevant; MRR uses the first grade-2 mentor (grade >= 1 if a profile has no grade-2 mentor); nDCG@5 uses gain 2^grade - 1"
+  },
+  "judged_mentors": [
+    "ava.chen@mentors.mentora.dev",
+    "marcus.reid@mentors.mentora.dev",
+    "priya.nair@mentors.mentora.dev",
+    "david.okafor@mentors.mentora.dev",
+    "elena.petrova@mentors.mentora.dev",
+    "tom.sullivan@mentors.mentora.dev",
+    "sofia.marquez@mentors.mentora.dev",
+    "james.whitfield@mentors.mentora.dev",
+    "grace.kim@mentors.mentora.dev",
+    "ben.alaoui@mentors.mentora.dev",
+    "nadia.hassan@mentors.mentora.dev",
+    "liam.oconnor@mentors.mentora.dev",
+    "chloe.dubois@mentors.mentora.dev",
+    "ravi.deshmukh@mentors.mentora.dev",
+    "hannah.fischer@mentors.mentora.dev"
+  ],
+  "profiles": [
+    {
+      "id": "greenhaul",
+      "source": "deck:test_decks/GreenHaul.pdf",
+      "profile": {
+        "domain": "Clean Energy",
+        "stage": "MVP",
+        "challenges": [
+          "Securing regulatory approvals for grid integration and utility partnerships across multiple states",
+          "Raising a seed round to expand route-optimization engine and hire data science team",
+          "Building partnerships with utility companies and EV charging network operators",
+          "Achieving product-market fit with fleet operators beyond initial pilot customers"
+        ],
+        "team_gaps": [
+          "No in-house regulatory/compliance expertise for energy sector rules",
+          "Need a VP of Sales with enterprise logistics experience",
+          "Missing a senior data scientist for forecasting models"
+        ],
+        "geography": null
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "Climate Tech"
+        ],
+        "need_tags": [
+          "Regulatory Compliance",
+          "Fundraising",
+          "Partnerships",
+          "Product-Market Fit",
+          "B2B Sales",
+          "Hiring"
+        ]
+      },
+      "relevance": {
+        "chloe.dubois@mentors.mentora.dev": 2,
+        "ava.chen@mentors.mentora.dev": 1,
+        "ben.alaoui@mentors.mentora.dev": 1,
+        "david.okafor@mentors.mentora.dev": 1,
+        "hannah.fischer@mentors.mentora.dev": 1,
+        "james.whitfield@mentors.mentora.dev": 1,
+        "nadia.hassan@mentors.mentora.dev": 1,
+        "priya.nair@mentors.mentora.dev": 1,
+        "ravi.deshmukh@mentors.mentora.dev": 1,
+        "sofia.marquez@mentors.mentora.dev": 1,
+        "tom.sullivan@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "skillbridge",
+      "source": "deck:test_decks/SkillBridge.pdf",
+      "profile": {
+        "domain": "EdTech",
+        "stage": "idea",
+        "challenges": [
+          "Validating product-market fit with school districts and teachers",
+          "Conducting user research with students, parents, teachers",
+          "Building go-to-market partnerships with school districts and nonprofits",
+          "Understanding procurement processes for K-12 ed tech"
+        ],
+        "team_gaps": [
+          "No curriculum design expert with K-12 classroom experience",
+          "Need someone with experience selling into school districts",
+          "Missing a co-founder with learning science / pedagogy background"
+        ],
+        "geography": null
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "EdTech"
+        ],
+        "need_tags": [
+          "Product-Market Fit",
+          "User Research",
+          "Partnerships",
+          "Go-to-Market",
+          "Curriculum Design",
+          "B2B Sales"
+        ]
+      },
+      "relevance": {
+        "elena.petrova@mentors.mentora.dev": 2,
+        "tom.sullivan@mentors.mentora.dev": 2,
+        "hannah.fischer@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "paylane",
+      "source": "hand",
+      "profile": {
+        "domain": "Fintech",
+        "stage": "MVP",
+        "geography": "Mumbai",
+        "challenges": [
+          "Getting an RBI payment aggregator licence",
+          "Raising a seed round",
+          "Acquiring the first 1,000 small merchants"
+        ],
+        "team_gaps": [
+          "No compliance officer",
+          "Need a head of sales for SMB merchants"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "Fintech"
+        ],
+        "need_tags": [
+          "Regulatory Compliance",
+          "Fundraising",
+          "Go-to-Market",
+          "B2B Sales"
+        ]
+      },
+      "relevance": {
+        "ava.chen@mentors.mentora.dev": 2,
+        "marcus.reid@mentors.mentora.dev": 2,
+        "ben.alaoui@mentors.mentora.dev": 1,
+        "chloe.dubois@mentors.mentora.dev": 1,
+        "david.okafor@mentors.mentora.dev": 1,
+        "james.whitfield@mentors.mentora.dev": 1,
+        "liam.oconnor@mentors.mentora.dev": 1,
+        "ravi.deshmukh@mentors.mentora.dev": 1,
+        "tom.sullivan@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "lendwise",
+      "source": "hand",
+      "profile": {
+        "domain": "Fintech",
+        "stage": "growth",
+        "geography": "Bengaluru",
+        "challenges": [
+          "Scaling loan operations across five new cities",
+          "Enterprise partnerships with NBFCs",
+          "Raising a Series B"
+        ],
+        "team_gaps": [
+          "Need a COO with lending operations experience",
+          "Need an enterprise sales leader"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "Fintech"
+        ],
+        "need_tags": [
+          "Scaling Operations",
+          "Partnerships",
+          "Fundraising",
+          "B2B Sales"
+        ]
+      },
+      "relevance": {
+        "marcus.reid@mentors.mentora.dev": 2,
+        "ava.chen@mentors.mentora.dev": 1,
+        "ben.alaoui@mentors.mentora.dev": 1,
+        "james.whitfield@mentors.mentora.dev": 1,
+        "ravi.deshmukh@mentors.mentora.dev": 1,
+        "tom.sullivan@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "coinnest",
+      "source": "hand",
+      "profile": {
+        "domain": "Fintech",
+        "stage": "idea",
+        "geography": "San Francisco, CA",
+        "challenges": [
+          "Validating demand for a crypto savings app among millennials",
+          "Understanding SEC and state money-transmitter rules",
+          "Pre-seed fundraising"
+        ],
+        "team_gaps": [
+          "No legal or compliance advisor",
+          "Missing a product designer"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "Fintech"
+        ],
+        "need_tags": [
+          "Product-Market Fit",
+          "Regulatory Compliance",
+          "Fundraising"
+        ]
+      },
+      "relevance": {
+        "ava.chen@mentors.mentora.dev": 2,
+        "chloe.dubois@mentors.mentora.dev": 1,
+        "marcus.reid@mentors.mentora.dev": 1,
+        "priya.nair@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "carepulse",
+      "source": "hand",
+      "profile": {
+        "domain": "HealthTech",
+        "stage": "MVP",
+        "geography": "Bangalore, India",
+        "challenges": [
+          "Running a clinical validation study with hospitals",
+          "CDSCO medical device approval for our cardiac wearable",
+          "Signing hospital pilot partnerships"
+        ],
+        "team_gaps": [
+          "No clinical or medical affairs lead",
+          "Need a regulatory affairs expert"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "HealthTech"
+        ],
+        "need_tags": [
+          "Clinical Partnerships",
+          "Regulatory Compliance",
+          "Partnerships"
+        ]
+      },
+      "relevance": {
+        "priya.nair@mentors.mentora.dev": 2,
+        "david.okafor@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "mindmend",
+      "source": "hand",
+      "profile": {
+        "domain": "HealthTech",
+        "stage": "idea",
+        "geography": "Remote",
+        "challenges": [
+          "Validating whether employers will pay for mental wellness",
+          "User research with therapists and patients",
+          "HIPAA and data privacy compliance"
+        ],
+        "team_gaps": [
+          "No clinical psychologist on the team",
+          "Need a product manager"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "HealthTech"
+        ],
+        "need_tags": [
+          "Product-Market Fit",
+          "User Research",
+          "Regulatory Compliance"
+        ]
+      },
+      "relevance": {
+        "priya.nair@mentors.mentora.dev": 2,
+        "ava.chen@mentors.mentora.dev": 1,
+        "chloe.dubois@mentors.mentora.dev": 1,
+        "david.okafor@mentors.mentora.dev": 1,
+        "elena.petrova@mentors.mentora.dev": 1,
+        "hannah.fischer@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "medistock",
+      "source": "hand",
+      "profile": {
+        "domain": "HealthTech",
+        "stage": "growth",
+        "geography": "London, UK",
+        "challenges": [
+          "Expanding pharmacy inventory software to 500 pharmacies across the UK",
+          "Raising a Series A",
+          "Hiring an engineering team quickly"
+        ],
+        "team_gaps": [
+          "Need a VP Engineering",
+          "Need a head of sales for pharmacy chains"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "HealthTech"
+        ],
+        "need_tags": [
+          "Scaling Operations",
+          "Fundraising",
+          "Hiring",
+          "B2B Sales",
+          "Go-to-Market"
+        ]
+      },
+      "relevance": {
+        "david.okafor@mentors.mentora.dev": 2,
+        "ben.alaoui@mentors.mentora.dev": 1,
+        "james.whitfield@mentors.mentora.dev": 1,
+        "liam.oconnor@mentors.mentora.dev": 1,
+        "marcus.reid@mentors.mentora.dev": 1,
+        "priya.nair@mentors.mentora.dev": 1,
+        "ravi.deshmukh@mentors.mentora.dev": 1,
+        "tom.sullivan@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "tutorloop",
+      "source": "hand",
+      "profile": {
+        "domain": "EdTech",
+        "stage": "MVP",
+        "geography": "Boston, MA",
+        "challenges": [
+          "Selling to university administrations",
+          "Partnerships with student organisations",
+          "Go-to-market across campuses"
+        ],
+        "team_gaps": [
+          "No experienced B2B education salesperson"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "EdTech"
+        ],
+        "need_tags": [
+          "B2B Sales",
+          "Partnerships",
+          "Go-to-Market"
+        ]
+      },
+      "relevance": {
+        "tom.sullivan@mentors.mentora.dev": 2,
+        "elena.petrova@mentors.mentora.dev": 1,
+        "marcus.reid@mentors.mentora.dev": 1,
+        "ravi.deshmukh@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "upskillhub",
+      "source": "hand",
+      "profile": {
+        "domain": "EdTech",
+        "stage": "growth",
+        "geography": "Hyderabad",
+        "challenges": [
+          "Scaling content production operations",
+          "Enterprise sales to large IT services companies",
+          "Raising a Series B"
+        ],
+        "team_gaps": [
+          "Need a VP Sales for enterprise L&D",
+          "Need a head of content operations"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "EdTech"
+        ],
+        "need_tags": [
+          "Scaling Operations",
+          "B2B Sales",
+          "Fundraising"
+        ]
+      },
+      "label_overrides": {
+        "tom.sullivan@mentors.mentora.dev": "Same sector, adjacent stage; enterprise B2B sales into education is the lead need."
+      },
+      "relevance": {
+        "tom.sullivan@mentors.mentora.dev": 2,
+        "ben.alaoui@mentors.mentora.dev": 1,
+        "elena.petrova@mentors.mentora.dev": 1,
+        "james.whitfield@mentors.mentora.dev": 1,
+        "marcus.reid@mentors.mentora.dev": 1,
+        "ravi.deshmukh@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "stackpilot",
+      "source": "hand",
+      "profile": {
+        "domain": "SaaS",
+        "stage": "MVP",
+        "geography": "Austin, TX",
+        "challenges": [
+          "Re-architecting the backend for multi-tenant scale",
+          "Finding product-market fit with mid-size engineering teams",
+          "Hiring senior engineers"
+        ],
+        "team_gaps": [
+          "No experienced CTO",
+          "Need senior backend engineers"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "SaaS"
+        ],
+        "need_tags": [
+          "Technical Architecture",
+          "Product-Market Fit",
+          "Hiring"
+        ]
+      },
+      "relevance": {
+        "hannah.fischer@mentors.mentora.dev": 2,
+        "sofia.marquez@mentors.mentora.dev": 2,
+        "james.whitfield@mentors.mentora.dev": 1,
+        "nadia.hassan@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "ledgerly",
+      "source": "hand",
+      "profile": {
+        "domain": "SaaS",
+        "stage": "growth",
+        "geography": "New York, NY",
+        "challenges": [
+          "Scaling the enterprise sales team",
+          "Raising a Series B",
+          "Scaling customer success operations"
+        ],
+        "team_gaps": [
+          "Need a CRO",
+          "Need a VP Customer Success"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "SaaS"
+        ],
+        "need_tags": [
+          "B2B Sales",
+          "Fundraising",
+          "Scaling Operations",
+          "Hiring"
+        ]
+      },
+      "relevance": {
+        "james.whitfield@mentors.mentora.dev": 2,
+        "ben.alaoui@mentors.mentora.dev": 1,
+        "david.okafor@mentors.mentora.dev": 1,
+        "hannah.fischer@mentors.mentora.dev": 1,
+        "marcus.reid@mentors.mentora.dev": 1,
+        "ravi.deshmukh@mentors.mentora.dev": 1,
+        "sofia.marquez@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "formcraft",
+      "source": "hand",
+      "profile": {
+        "domain": "SaaS",
+        "stage": "idea",
+        "geography": "Berlin, Germany",
+        "challenges": [
+          "Validating the problem with HR teams through user interviews",
+          "Defining the MVP scope",
+          "Recruiting the first engineers"
+        ],
+        "team_gaps": [
+          "No technical co-founder",
+          "No UX researcher"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "SaaS"
+        ],
+        "need_tags": [
+          "User Research",
+          "Product-Market Fit",
+          "Hiring"
+        ]
+      },
+      "relevance": {
+        "hannah.fischer@mentors.mentora.dev": 2,
+        "sofia.marquez@mentors.mentora.dev": 2,
+        "elena.petrova@mentors.mentora.dev": 1,
+        "james.whitfield@mentors.mentora.dev": 1,
+        "nadia.hassan@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "threadly",
+      "source": "hand",
+      "profile": {
+        "domain": "D2C",
+        "stage": "idea",
+        "geography": "Mumbai",
+        "challenges": [
+          "Building a sustainable fashion brand on Instagram",
+          "Sourcing from sustainable suppliers",
+          "Planning the go-to-market launch"
+        ],
+        "team_gaps": [
+          "No supply chain expert",
+          "Need a brand and marketing lead"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "E-commerce"
+        ],
+        "need_tags": [
+          "Branding",
+          "Supply Chain",
+          "Go-to-Market"
+        ]
+      },
+      "relevance": {
+        "grace.kim@mentors.mentora.dev": 2,
+        "ben.alaoui@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "kartfast",
+      "source": "hand",
+      "profile": {
+        "domain": "E-commerce",
+        "stage": "growth",
+        "geography": "Dubai, UAE",
+        "challenges": [
+          "Scaling dark-store operations for quick commerce",
+          "Raising a Series B",
+          "Negotiating B2B supplier deals"
+        ],
+        "team_gaps": [
+          "Need a COO",
+          "Need a head of supply chain"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "E-commerce"
+        ],
+        "need_tags": [
+          "Scaling Operations",
+          "Fundraising",
+          "B2B Sales",
+          "Supply Chain"
+        ]
+      },
+      "relevance": {
+        "ben.alaoui@mentors.mentora.dev": 2,
+        "grace.kim@mentors.mentora.dev": 1,
+        "james.whitfield@mentors.mentora.dev": 1,
+        "marcus.reid@mentors.mentora.dev": 1,
+        "ravi.deshmukh@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "visionqa",
+      "source": "hand",
+      "profile": {
+        "domain": "AI/ML",
+        "stage": "MVP",
+        "geography": "Dublin, Ireland",
+        "challenges": [
+          "Model architecture for real-time inference on factory edge devices",
+          "Raising a seed round",
+          "Go-to-market with manufacturers"
+        ],
+        "team_gaps": [
+          "Need an ML infrastructure engineer",
+          "No sales lead"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "AI/ML"
+        ],
+        "need_tags": [
+          "Technical Architecture",
+          "Fundraising",
+          "Go-to-Market",
+          "Hiring"
+        ]
+      },
+      "relevance": {
+        "liam.oconnor@mentors.mentora.dev": 2,
+        "nadia.hassan@mentors.mentora.dev": 2,
+        "david.okafor@mentors.mentora.dev": 1,
+        "sofia.marquez@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "lexibot",
+      "source": "hand",
+      "profile": {
+        "domain": "AI/ML",
+        "stage": "idea",
+        "geography": "Remote",
+        "challenges": [
+          "Validating willingness to pay among law firms",
+          "Designing a retrieval-augmented generation architecture",
+          "Recruiting ML engineers"
+        ],
+        "team_gaps": [
+          "No ML lead",
+          "No legal domain expert"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "AI/ML"
+        ],
+        "need_tags": [
+          "Product-Market Fit",
+          "Technical Architecture",
+          "Hiring"
+        ]
+      },
+      "relevance": {
+        "nadia.hassan@mentors.mentora.dev": 2,
+        "hannah.fischer@mentors.mentora.dev": 1,
+        "liam.oconnor@mentors.mentora.dev": 1,
+        "sofia.marquez@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "solarshare",
+      "source": "hand",
+      "profile": {
+        "domain": "Climate Tech",
+        "stage": "idea",
+        "geography": "Paris, France",
+        "challenges": [
+          "Navigating energy regulations for community solar",
+          "Pre-seed fundraising",
+          "Validating demand among apartment residents"
+        ],
+        "team_gaps": [
+          "No energy policy expert"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "Climate Tech"
+        ],
+        "need_tags": [
+          "Regulatory Compliance",
+          "Fundraising",
+          "Product-Market Fit"
+        ]
+      },
+      "relevance": {
+        "chloe.dubois@mentors.mentora.dev": 2,
+        "ava.chen@mentors.mentora.dev": 1,
+        "priya.nair@mentors.mentora.dev": 1,
+        "ravi.deshmukh@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "carbonledger",
+      "source": "hand",
+      "profile": {
+        "domain": "Climate Tech",
+        "stage": "growth",
+        "geography": "Bangalore",
+        "challenges": [
+          "Scaling enterprise sales of carbon accounting software across Southeast Asia",
+          "Go-to-market with large manufacturers",
+          "Scaling the implementation team"
+        ],
+        "team_gaps": [
+          "Need a VP Sales",
+          "Need a head of operations"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "Climate Tech"
+        ],
+        "need_tags": [
+          "B2B Sales",
+          "Go-to-Market",
+          "Scaling Operations"
+        ]
+      },
+      "relevance": {
+        "ravi.deshmukh@mentors.mentora.dev": 2,
+        "ben.alaoui@mentors.mentora.dev": 1,
+        "chloe.dubois@mentors.mentora.dev": 1,
+        "james.whitfield@mentors.mentora.dev": 1,
+        "marcus.reid@mentors.mentora.dev": 1,
+        "tom.sullivan@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "evgrid",
+      "source": "hand",
+      "profile": {
+        "domain": "Clean Energy",
+        "stage": "growth",
+        "geography": "Delhi",
+        "challenges": [
+          "Scaling the EV charging network to 1,000 charging points",
+          "Partnerships with oil marketing companies and malls",
+          "B2B sales to fleet operators",
+          "Raising a Series B"
+        ],
+        "team_gaps": [
+          "Need a COO",
+          "Need an enterprise sales head"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "Climate Tech"
+        ],
+        "need_tags": [
+          "Scaling Operations",
+          "Partnerships",
+          "B2B Sales",
+          "Fundraising"
+        ]
+      },
+      "relevance": {
+        "ravi.deshmukh@mentors.mentora.dev": 2,
+        "ben.alaoui@mentors.mentora.dev": 1,
+        "chloe.dubois@mentors.mentora.dev": 1,
+        "james.whitfield@mentors.mentora.dev": 1,
+        "marcus.reid@mentors.mentora.dev": 1,
+        "tom.sullivan@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "fieldsense",
+      "source": "hand",
+      "profile": {
+        "domain": "AgriTech",
+        "stage": "MVP",
+        "geography": "Pune",
+        "challenges": [
+          "Distributing soil sensors to smallholder farmers through FPO partnerships",
+          "Hardware supply chain and manufacturing",
+          "Raising a seed round"
+        ],
+        "team_gaps": [
+          "Need an agronomist",
+          "Need a hardware supply chain manager"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [],
+        "need_tags": [
+          "Partnerships",
+          "Supply Chain",
+          "Fundraising",
+          "Go-to-Market"
+        ]
+      },
+      "relevance": {
+        "david.okafor@mentors.mentora.dev": 1,
+        "grace.kim@mentors.mentora.dev": 1,
+        "liam.oconnor@mentors.mentora.dev": 1,
+        "tom.sullivan@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "cropcredit",
+      "source": "hand",
+      "profile": {
+        "domain": "AgriTech",
+        "sectors": [
+          "AgriTech",
+          "FinTech"
+        ],
+        "stage": "idea",
+        "geography": "Bangalore",
+        "challenges": [
+          "RBI lending compliance for agricultural loans",
+          "Validating farmer repayment behaviour",
+          "Pre-seed fundraising"
+        ],
+        "team_gaps": [
+          "No credit risk expert",
+          "No compliance lead"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "Fintech"
+        ],
+        "need_tags": [
+          "Regulatory Compliance",
+          "Product-Market Fit",
+          "Fundraising"
+        ]
+      },
+      "relevance": {
+        "ava.chen@mentors.mentora.dev": 2,
+        "chloe.dubois@mentors.mentora.dev": 1,
+        "marcus.reid@mentors.mentora.dev": 1,
+        "priya.nair@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "routemate",
+      "source": "hand",
+      "profile": {
+        "domain": "Logistics",
+        "stage": "MVP",
+        "geography": "Chennai",
+        "challenges": [
+          "Acquiring shippers through B2B sales",
+          "Scaling operations to new freight routes",
+          "Raising a seed round"
+        ],
+        "team_gaps": [
+          "Need a head of sales",
+          "Need an operations lead"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [],
+        "need_tags": [
+          "B2B Sales",
+          "Scaling Operations",
+          "Fundraising"
+        ]
+      },
+      "relevance": {
+        "ben.alaoui@mentors.mentora.dev": 1,
+        "james.whitfield@mentors.mentora.dev": 1,
+        "marcus.reid@mentors.mentora.dev": 1,
+        "ravi.deshmukh@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "botworks",
+      "source": "hand",
+      "profile": {
+        "domain": "DeepTech",
+        "stage": "MVP",
+        "geography": "Hyderabad",
+        "challenges": [
+          "Perception and navigation architecture for autonomous warehouse robots",
+          "Raising a seed round for hardware",
+          "Running first pilots with 3PL warehouses"
+        ],
+        "team_gaps": [
+          "Need a robotics and ML lead",
+          "Need enterprise sales"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "AI/ML"
+        ],
+        "need_tags": [
+          "Technical Architecture",
+          "Fundraising",
+          "Partnerships",
+          "B2B Sales",
+          "Hiring"
+        ]
+      },
+      "relevance": {
+        "liam.oconnor@mentors.mentora.dev": 2,
+        "nadia.hassan@mentors.mentora.dev": 2,
+        "ben.alaoui@mentors.mentora.dev": 1,
+        "david.okafor@mentors.mentora.dev": 1,
+        "james.whitfield@mentors.mentora.dev": 1,
+        "sofia.marquez@mentors.mentora.dev": 1,
+        "tom.sullivan@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "pixelquest",
+      "source": "hand",
+      "profile": {
+        "domain": "Gaming",
+        "stage": "idea",
+        "geography": "Remote",
+        "challenges": [
+          "Validating the game concept with players",
+          "User acquisition strategy",
+          "Pre-seed fundraising"
+        ],
+        "team_gaps": [
+          "No game designer",
+          "No marketing lead"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [],
+        "need_tags": [
+          "User Research",
+          "Product-Market Fit",
+          "Go-to-Market",
+          "Fundraising"
+        ]
+      },
+      "relevance": {
+        "ava.chen@mentors.mentora.dev": 1,
+        "chloe.dubois@mentors.mentora.dev": 1,
+        "elena.petrova@mentors.mentora.dev": 1,
+        "hannah.fischer@mentors.mentora.dev": 1,
+        "liam.oconnor@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "insurenow",
+      "source": "hand",
+      "profile": {
+        "domain": "InsurTech",
+        "stage": "MVP",
+        "geography": "Mumbai",
+        "challenges": [
+          "IRDAI regulatory sandbox approval for embedded insurance APIs",
+          "Partnerships with e-commerce platforms",
+          "B2B sales to platforms"
+        ],
+        "team_gaps": [
+          "No compliance officer"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "Fintech"
+        ],
+        "need_tags": [
+          "Regulatory Compliance",
+          "Partnerships",
+          "B2B Sales"
+        ]
+      },
+      "label_overrides": {
+        "ava.chen@mentors.mentora.dev": "Fintech regulatory approval (IRDAI sandbox) is the lead challenge; adjacent stage."
+      },
+      "relevance": {
+        "ava.chen@mentors.mentora.dev": 2,
+        "marcus.reid@mentors.mentora.dev": 1,
+        "tom.sullivan@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "clinicflow",
+      "source": "hand",
+      "profile": {
+        "domain": "HealthTech",
+        "sectors": [
+          "HealthTech",
+          "SaaS"
+        ],
+        "stage": "growth",
+        "geography": "New York, NY",
+        "challenges": [
+          "Scaling sales of clinic scheduling software to multi-location chains",
+          "Raising a Series A",
+          "Hiring a customer success team"
+        ],
+        "team_gaps": [
+          "Need a VP Sales",
+          "Need a head of customer success"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "HealthTech",
+          "SaaS"
+        ],
+        "need_tags": [
+          "B2B Sales",
+          "Fundraising",
+          "Hiring",
+          "Scaling Operations"
+        ]
+      },
+      "relevance": {
+        "david.okafor@mentors.mentora.dev": 2,
+        "james.whitfield@mentors.mentora.dev": 2,
+        "ben.alaoui@mentors.mentora.dev": 1,
+        "hannah.fischer@mentors.mentora.dev": 1,
+        "marcus.reid@mentors.mentora.dev": 1,
+        "priya.nair@mentors.mentora.dev": 1,
+        "ravi.deshmukh@mentors.mentora.dev": 1,
+        "sofia.marquez@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "kidscode",
+      "source": "hand",
+      "profile": {
+        "domain": "EdTech",
+        "stage": "idea",
+        "geography": "Bangalore",
+        "challenges": [
+          "Curriculum design for coding classes for ages 8-12",
+          "Validating parents' willingness to pay",
+          "Building a trusted brand with parents"
+        ],
+        "team_gaps": [
+          "No curriculum designer",
+          "No marketing lead"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "EdTech"
+        ],
+        "need_tags": [
+          "Curriculum Design",
+          "Product-Market Fit",
+          "Branding",
+          "User Research"
+        ]
+      },
+      "relevance": {
+        "elena.petrova@mentors.mentora.dev": 2,
+        "hannah.fischer@mentors.mentora.dev": 1,
+        "tom.sullivan@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "supplysync",
+      "source": "hand",
+      "profile": {
+        "domain": "SaaS",
+        "sectors": [
+          "SaaS",
+          "D2C"
+        ],
+        "stage": "MVP",
+        "geography": "Delhi",
+        "challenges": [
+          "Integration architecture across Amazon, Flipkart and Shopify",
+          "Finding product-market fit with D2C brands",
+          "Inventory and supply chain domain knowledge"
+        ],
+        "team_gaps": [
+          "Need a senior integrations engineer"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "SaaS",
+          "E-commerce"
+        ],
+        "need_tags": [
+          "Technical Architecture",
+          "Product-Market Fit",
+          "Supply Chain"
+        ]
+      },
+      "relevance": {
+        "sofia.marquez@mentors.mentora.dev": 2,
+        "ben.alaoui@mentors.mentora.dev": 1,
+        "grace.kim@mentors.mentora.dev": 1,
+        "hannah.fischer@mentors.mentora.dev": 1,
+        "james.whitfield@mentors.mentora.dev": 1,
+        "nadia.hassan@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "wealthbuddy",
+      "source": "hand",
+      "profile": {
+        "domain": "Fintech",
+        "stage": "growth",
+        "geography": "Remote",
+        "challenges": [
+          "Scaling customer acquisition for a robo-advisory app",
+          "Scaling support operations",
+          "Go-to-market in new countries",
+          "SEBI investment adviser regulations"
+        ],
+        "team_gaps": [
+          "Need a head of growth marketing"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "Fintech"
+        ],
+        "need_tags": [
+          "Go-to-Market",
+          "Scaling Operations",
+          "Regulatory Compliance"
+        ]
+      },
+      "relevance": {
+        "marcus.reid@mentors.mentora.dev": 2,
+        "ava.chen@mentors.mentora.dev": 1,
+        "ravi.deshmukh@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "nurseconnect",
+      "source": "hand",
+      "profile": {
+        "domain": "HealthTech",
+        "stage": "idea",
+        "geography": "Chennai",
+        "challenges": [
+          "Validating demand for home nursing among families",
+          "Hospital discharge partnerships",
+          "Hiring and vetting nurses"
+        ],
+        "team_gaps": [
+          "No healthcare operations lead"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "HealthTech"
+        ],
+        "need_tags": [
+          "Product-Market Fit",
+          "Clinical Partnerships",
+          "Partnerships",
+          "Hiring"
+        ]
+      },
+      "relevance": {
+        "priya.nair@mentors.mentora.dev": 2,
+        "david.okafor@mentors.mentora.dev": 1,
+        "hannah.fischer@mentors.mentora.dev": 1,
+        "nadia.hassan@mentors.mentora.dev": 1,
+        "sofia.marquez@mentors.mentora.dev": 1
+      }
+    },
+    {
+      "id": "shopsense",
+      "source": "hand",
+      "profile": {
+        "domain": "AI/ML",
+        "sectors": [
+          "DeepTech",
+          "D2C"
+        ],
+        "stage": "growth",
+        "geography": "Seoul, South Korea",
+        "challenges": [
+          "Scaling ML infrastructure for real-time product recommendations",
+          "Enterprise B2B sales to online retailers",
+          "Raising a Series A"
+        ],
+        "team_gaps": [
+          "Need a VP Engineering"
+        ]
+      },
+      "labeller_notes": {
+        "judged_sectors": [
+          "AI/ML",
+          "E-commerce"
+        ],
+        "need_tags": [
+          "Technical Architecture",
+          "B2B Sales",
+          "Fundraising",
+          "Hiring"
+        ]
+      },
+      "relevance": {
+        "ben.alaoui@mentors.mentora.dev": 2,
+        "liam.oconnor@mentors.mentora.dev": 2,
+        "david.okafor@mentors.mentora.dev": 1,
+        "grace.kim@mentors.mentora.dev": 1,
+        "james.whitfield@mentors.mentora.dev": 1,
+        "nadia.hassan@mentors.mentora.dev": 1,
+        "sofia.marquez@mentors.mentora.dev": 1
+      }
+    }
+  ]
+}

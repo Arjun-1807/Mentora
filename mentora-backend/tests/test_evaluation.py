@@ -5,11 +5,13 @@ import pytest
 
 from app.models.schemas import MentorMatch
 from app.services.evaluation import (
+    graded_ndcg_at_k,
     mean_score,
     ndcg_at_k,
     precision_at_k,
     recall_at_k,
     reciprocal_rank,
+    score_spread,
 )
 from tests.conftest import STARTUP_PAYLOAD, auth_header, register, seed_mentor
 
@@ -53,6 +55,31 @@ def test_ndcg_perfect_and_empty():
     assert ndcg_at_k(RANKED, RANKED + ["f", "g"]) == pytest.approx(1.0)  # IDCG capped at k
     assert ndcg_at_k(RANKED, ["z"]) == 0.0
     assert ndcg_at_k([], ["a"]) == 0.0
+
+
+def test_graded_ndcg_hand_computed():
+    # Grades: b=2 (rank 2), d=1 (rank 4), z=2 (never retrieved); gain = 2^g - 1.
+    grades = {"b": 2, "d": 1, "z": 2}
+    dcg = 3 / math.log2(3) + 1 / math.log2(5)
+    idcg = 3 / math.log2(2) + 3 / math.log2(3) + 1 / math.log2(4)
+    assert graded_ndcg_at_k(RANKED, grades) == pytest.approx(dcg / idcg)
+
+
+def test_graded_ndcg_perfect_empty_and_binary_equivalence():
+    assert graded_ndcg_at_k(["a", "b", "c"], {"a": 2, "b": 1}) == pytest.approx(1.0)
+    assert graded_ndcg_at_k(["b", "a"], {"a": 2, "b": 1}) < 1.0
+    assert graded_ndcg_at_k(RANKED, {}) == 0.0
+    assert graded_ndcg_at_k(RANKED, {"a": 0}) == 0.0
+    assert graded_ndcg_at_k([], {"a": 2}) == 0.0
+    # With grades of 1 only it reduces to the binary NDCG.
+    assert graded_ndcg_at_k(RANKED, {"b": 1, "d": 1, "z": 1}) == pytest.approx(ndcg_at_k(RANKED, ["b", "d", "z"]))
+
+
+def test_score_spread_is_top1_minus_topk():
+    assert score_spread([0.9, 0.8, 0.7, 0.6, 0.5, 0.1]) == pytest.approx(0.4)
+    assert score_spread([0.9, 0.7]) == pytest.approx(0.2)
+    assert score_spread([0.9]) == 0.0
+    assert score_spread([]) == 0.0
 
 
 def test_mean_score_ignores_missing():
