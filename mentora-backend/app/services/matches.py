@@ -57,6 +57,11 @@ REQUEST_STATUSES: List[str] = ["pending", "emailed", "email_sent"]
 ACCEPTED_STATUSES: List[str] = ["accepted", "meeting_scheduled", "completed"]
 MEETING_STATUSES: List[str] = ["meeting_scheduled", "completed"]
 EMAIL_SENT_OR_LATER: List[str] = MATCH_STATUS_ORDER[MATCH_STATUS_ORDER.index("email_sent"):]
+# Statuses that occupy a mentor's monthly capacity (mentor_matching's
+# capacity filter): the startup actually reached out ("requested") or
+# later, but the engagement is not finished. The single place to update
+# when the lifecycle is renamed (suggested/requested/... in Phase 2).
+CAPACITY_LOAD_STATUSES: List[str] = ["email_sent", "accepted", "meeting_scheduled"]
 
 
 def profile_fingerprint(profile: StartupProfile) -> str:

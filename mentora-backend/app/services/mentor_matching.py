@@ -15,14 +15,16 @@ Score convention: match_score is a float in the 0-1 range, computed as
 (see the module constants below and README "Scoring / matching details").
 """
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 from fastapi import HTTPException
 
 from app.config import settings
-from app.db.mongo import get_mentors_collection
+from app.db.mongo import get_matches_collection, get_mentors_collection
 from app.models.schemas import MentorMatch, StartupProfile
+from app.services.matches import CAPACITY_LOAD_STATUSES
 from app.services.embeddings import build_startup_profile_text, embed_passages, embed_queries, embed_query
 
 logger = logging.getLogger(__name__)
@@ -75,6 +77,23 @@ REASON_MIN_SIMILARITY = 0.5
 # How many raw candidates to pull from vector search before re-ranking.
 VECTOR_SEARCH_CANDIDATE_LIMIT = 20
 TOP_K_RESULTS = 5
+
+# --- Eligibility filters ----------------------------------------------------
+# Pre-filter inside $vectorSearch (needs `listed` / `active` declared as
+# filter fields in the Atlas index, see README). `$ne: false` keeps legacy
+# documents that do not have the fields yet.
+VECTOR_SEARCH_FILTER = {"$and": [{"listed": {"$ne": False}}, {"active": {"$ne": False}}]}
+# Capacity: a mentor whose load (matches in CAPACITY_LOAD_STATUSES whose
+# request was made in the last CAPACITY_WINDOW_DAYS) has reached their
+# max_startups_per_month is dropped - unless fewer than
+# MIN_ELIGIBLE_BEFORE_FALLBACK mentors would remain, in which case the
+# full mentors stay in with their score multiplied by CAPACITY_PENALTY.
+CAPACITY_WINDOW_DAYS = 30
+CAPACITY_PENALTY = 0.5
+MIN_ELIGIBLE_BEFORE_FALLBACK = 5
+# max_startups_per_month values ("1", "2", "3", "5+") -> monthly capacity.
+CAPACITY_BY_SETTING = {"1": 1, "2": 2, "3": 3, "5+": 8}
+# ---------------------------------------------------------------------------
 
 # Stage value meaning "mentors startups at any stage".
 ALL_STAGES = "all"
@@ -252,6 +271,72 @@ def compute_need_fit(
     return need_fit, reasons
 
 
+# --- eligibility / capacity -----------------------------------------------------
+
+def is_onboarded(candidate: Dict[str, Any]) -> bool:
+    """Onboarded mentors, plus legacy / seeded documents that predate the
+    `onboarding_completed` flag. Registered-but-not-onboarded mentors
+    (flag explicitly False) are not matched."""
+    return candidate.get("onboarding_completed", True) is not False
+
+
+def monthly_capacity(setting: Any) -> Optional[int]:
+    """Monthly capacity from max_startups_per_month (None = unlimited)."""
+    if setting is None:
+        return None
+    return CAPACITY_BY_SETTING.get(str(setting).strip())
+
+
+def recent_loads(mentor_ids: Sequence[str], now: Optional[datetime] = None) -> Dict[str, int]:
+    """Per mentor id, the number of matches in CAPACITY_LOAD_STATUSES whose
+    request (email_sent_at, else the match timestamp) is within the last
+    CAPACITY_WINDOW_DAYS. A database failure is logged and treated as no
+    load - capacity must never fail a /match request."""
+    if not mentor_ids:
+        return {}
+    cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=CAPACITY_WINDOW_DAYS)).isoformat()
+    pipeline = [
+        {
+            "$match": {
+                "mentor_id": {"$in": list(mentor_ids)},
+                "status": {"$in": list(CAPACITY_LOAD_STATUSES)},
+                "$or": [
+                    {"email_sent_at": {"$gte": cutoff}},
+                    {"email_sent_at": {"$exists": False}, "timestamp": {"$gte": cutoff}},
+                ],
+            }
+        },
+        {"$group": {"_id": "$mentor_id", "load": {"$sum": 1}}},
+    ]
+    try:
+        return {str(row["_id"]): int(row["load"]) for row in get_matches_collection().aggregate(pipeline)}
+    except Exception:
+        logger.exception("Failed to compute mentor capacity loads; ignoring capacity for this request")
+        return {}
+
+
+def apply_eligibility(candidates: List[dict], now: Optional[datetime] = None) -> Tuple[List[dict], set]:
+    """Drop non-onboarded mentors, then apply the capacity rule.
+
+    Returns (remaining candidates, ids of at-capacity mentors whose score
+    must be multiplied by CAPACITY_PENALTY - non-empty only in the
+    fallback case where dropping them would leave fewer than
+    MIN_ELIGIBLE_BEFORE_FALLBACK mentors).
+    """
+    onboarded = [c for c in candidates if is_onboarded(c)]
+    loads = recent_loads([str(c.get("_id", "")) for c in onboarded], now=now)
+    full = set()
+    for candidate in onboarded:
+        capacity = monthly_capacity(candidate.get("max_startups_per_month"))
+        mentor_id = str(candidate.get("_id", ""))
+        if capacity is not None and loads.get(mentor_id, 0) >= capacity:
+            full.add(mentor_id)
+    available = [c for c in onboarded if str(c.get("_id", "")) not in full]
+    if len(available) >= MIN_ELIGIBLE_BEFORE_FALLBACK:
+        return available, set()
+    return onboarded, full
+
+
 NO_MENTORS_MESSAGE = "No mentor profiles found. Please seed the database."
 
 
@@ -285,6 +370,7 @@ def _run_vector_search(embedding: List[float]) -> List[dict]:
                 "queryVector": embedding,
                 "numCandidates": VECTOR_SEARCH_CANDIDATE_LIMIT * 10,
                 "limit": VECTOR_SEARCH_CANDIDATE_LIMIT,
+                "filter": VECTOR_SEARCH_FILTER,
             }
         },
         {
@@ -301,6 +387,8 @@ def _run_vector_search(embedding: List[float]) -> List[dict]:
                 "email": 1,
                 "preferred_stages": 1,
                 "effectiveness_score": 1,
+                "onboarding_completed": 1,
+                "max_startups_per_month": 1,
                 "score": {"$meta": "vectorSearchScore"},
             }
         },
@@ -333,7 +421,7 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
     )
     query_embedding = embed_query(profile_text)
 
-    candidates = _run_vector_search(query_embedding)
+    candidates, penalised_ids = apply_eligibility(_run_vector_search(query_embedding))
 
     if not candidates:
         return []
@@ -373,6 +461,8 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
             + geography_match * GEOGRAPHY_MATCH_WEIGHT
             + effectiveness_score_normalized * EFFECTIVENESS_WEIGHT
         )
+        if str(candidate.get("_id", "")) in penalised_ids:
+            final_score *= CAPACITY_PENALTY
         final_score = max(0.0, min(1.0, final_score))
 
         ranked.append(

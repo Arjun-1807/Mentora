@@ -346,6 +346,20 @@ def test_domain_match_is_any_overlap_of_sectors(fake_vector_search, startup_sect
     assert find_matching_mentors(profile)[0].match_score == pytest.approx(expected, abs=1e-4)
 
 
+def test_vector_search_prefilters_listed_and_active(monkeypatch):
+    captured = {}
+
+    class FakeCollection:
+        def aggregate(self, pipeline):
+            captured["pipeline"] = pipeline
+            return []
+
+    monkeypatch.setattr(mm, "get_mentors_collection", lambda: FakeCollection())
+    mm._run_vector_search([0.0] * DIM)
+    stage = captured["pipeline"][0]["$vectorSearch"]
+    assert stage["filter"] == {"$and": [{"listed": {"$ne": False}}, {"active": {"$ne": False}}]}
+
+
 def test_canonical_domain_maps_onto_mentor_sectors():
     assert mm.canonical_domain("Climate Tech") == "Clean Energy"
     assert mm.canonical_domain("AI/ML") == "DeepTech"
@@ -354,3 +368,81 @@ def test_canonical_domain_maps_onto_mentor_sectors():
     assert mm.canonical_domain("Logistics") == "Logistics"
     assert mm.canonical_domain(" Gaming ") == "gaming"
     assert mm.canonical_domain(None) == ""
+
+
+# --- eligibility: onboarding + capacity -----------------------------------------
+
+def _load(fake_mongo, mentor_id, n, *, status="accepted", days_ago=1, field="email_sent_at"):
+    """Insert n matches for mentor_id at `status`, requested `days_ago` days ago."""
+    from datetime import datetime, timedelta, timezone
+
+    from tests.conftest import insert_match
+
+    when = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+    for i in range(n):
+        insert_match(fake_mongo, user_id=f"startup-{mentor_id}-{i}", mentor_id=mentor_id, status=status,
+                     **{field: when} if field == "email_sent_at" else {"timestamp": when})
+
+
+def _pool(n, **overrides):
+    return [_zero(_id=f"m{i}", score=0.9 - i / 100, **overrides) for i in range(n)]
+
+
+def test_mentors_who_have_not_finished_onboarding_are_not_matched(fake_vector_search):
+    fake_vector_search([
+        _zero(_id="legacy"),                                      # no flag: seeded / legacy
+        _zero(_id="done", onboarding_completed=True),
+        _zero(_id="pending", onboarding_completed=False),
+    ])
+    ids = {m.mentor_id for m in find_matching_mentors(PROFILE_NO_NEEDS)}
+    assert ids == {"legacy", "done"}
+
+
+@pytest.mark.parametrize(
+    "setting, capacity", [("1", 1), ("2", 2), ("3", 3), ("5+", 8), (None, None), ("lots", None)]
+)
+def test_monthly_capacity(setting, capacity):
+    assert mm.monthly_capacity(setting) == capacity
+
+
+def test_capacity_load_counts_only_recent_requested_or_later(fake_mongo):
+    _load(fake_mongo, "a", 2, status="email_sent")
+    _load(fake_mongo, "a", 1, status="meeting_scheduled")
+    _load(fake_mongo, "a", 1, status="accepted", days_ago=40)            # too old
+    _load(fake_mongo, "a", 1, status="pending")                           # never requested
+    _load(fake_mongo, "a", 1, status="completed")                         # engagement finished
+    _load(fake_mongo, "b", 1, status="accepted", field="timestamp")        # no email_sent_at -> timestamp
+    assert mm.recent_loads(["a", "b", "c"]) == {"a": 3, "b": 1}
+    assert mm.CAPACITY_LOAD_STATUSES == ["email_sent", "accepted", "meeting_scheduled"]
+
+
+def test_mentors_at_capacity_are_dropped_when_enough_remain(fake_vector_search, fake_mongo):
+    pool = _pool(7, max_startups_per_month="1")
+    _load(fake_mongo, "m0", 1)                     # full (1/1)
+    _load(fake_mongo, "m1", 1, days_ago=45)        # old load does not count
+    fake_vector_search(pool)
+    ids = [m.mentor_id for m in find_matching_mentors(PROFILE_NO_NEEDS)]
+    assert "m0" not in ids
+    assert ids == ["m1", "m2", "m3", "m4", "m5"]
+
+
+def test_capacity_falls_back_to_a_half_score_when_too_few_remain(fake_vector_search, fake_mongo):
+    pool = _pool(5, max_startups_per_month="2")
+    _load(fake_mongo, "m0", 2)                     # full -> only 4 would remain
+    fake_vector_search(pool)
+    results = {m.mentor_id: m.match_score for m in find_matching_mentors(PROFILE_NO_NEEDS)}
+    assert set(results) == {"m0", "m1", "m2", "m3", "m4"}
+    expected_unpenalised = mm.SIMILARITY_WEIGHT * mm.calibrate_similarity(0.9)
+    assert results["m0"] == pytest.approx(expected_unpenalised * mm.CAPACITY_PENALTY, abs=1e-4)
+
+
+def test_unlimited_capacity_and_capacity_db_errors_never_drop_mentors(fake_vector_search, fake_mongo, monkeypatch):
+    _load(fake_mongo, "m0", 20)
+    fake_vector_search(_pool(6))                   # no max_startups_per_month -> unlimited
+    assert "m0" in {m.mentor_id for m in find_matching_mentors(PROFILE_NO_NEEDS)}
+
+    def broken():
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(mm, "get_matches_collection", broken)
+    assert mm.recent_loads(["m0"]) == {}
