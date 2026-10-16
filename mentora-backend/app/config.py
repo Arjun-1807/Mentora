@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     MONGODB_FEEDBACK_COLLECTION: str = "feedback"
     MONGODB_MATCHES_COLLECTION: str = "matches"
     MONGODB_USERS_COLLECTION: str = "users"
+    MONGODB_OAUTH_STATES_COLLECTION: str = "oauth_states"
+    MONGODB_MEETING_NOTES_COLLECTION: str = "meeting_notes"
 
     # Embeddings
     EMBEDDING_MODEL_NAME: str = "BAAI/bge-base-en-v1.5"
@@ -68,6 +70,16 @@ class Settings(BaseSettings):
     LOGIN_RATE_WINDOW_SECONDS: int = 300
     LLM_RATE_LIMIT: int = 20            # /extract + /email calls per window, per user
     LLM_RATE_WINDOW_SECONDS: int = 3600
+
+    # Google Calendar (OAuth 2.0 web client). Leave the id/secret empty to
+    # disable the calendar endpoints (they then answer 503).
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = "http://localhost:3000/calendar/callback"
+    # IANA timezone in which booked slot times ("HH:MM") are interpreted.
+    CALENDAR_TIMEZONE: str = "Asia/Kolkata"
+    # How long an OAuth `state` token stays valid (seconds).
+    OAUTH_STATE_TTL_SECONDS: int = 15 * 60
 
     # CORS
     FRONTEND_ORIGIN: str = "http://localhost:3000"

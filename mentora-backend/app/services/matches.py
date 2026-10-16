@@ -13,26 +13,50 @@ Two concerns live here:
    creating new ones.
 
 2. **Status lifecycle.** `pending` -> `emailed` -> `email_sent` ->
-   `completed`, advanced only forwards (see `advance_match_status`).
-   `emailed` means a draft was generated; `email_sent` means it was
-   actually delivered (the match then also carries `email_sent_at`).
+   `accepted` -> `meeting_scheduled` -> `completed`, advanced only
+   forwards (see `advance_match_status`). `emailed` means a draft was
+   generated; `email_sent` means it was actually delivered (the match then
+   also carries `email_sent_at`); `accepted` is set by the mentor;
+   `meeting_scheduled` by POST /calendar/book (the match then carries a
+   `meeting` object); `completed` by POST /feedback. `declined` is a
+   terminal side-branch set by the mentor and is never advanced from.
+
+3. **Enrichment.** `enrich_match_docs` backfills `mentor_name` (legacy
+   documents predate it) and, for mentor-facing listings, `startup_email`.
 """
 import hashlib
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from uuid import uuid4
 
+from bson import ObjectId
+from bson.errors import InvalidId
 from pymongo import ReturnDocument
 
-from app.db.mongo import get_matches_collection
+from app.db.mongo import get_matches_collection, get_mentors_collection, get_users_collection
 from app.models.schemas import MentorMatch, StartupProfile
 
 logger = logging.getLogger(__name__)
 
 # Ordered status vocabulary; index == lifecycle position.
-MATCH_STATUS_ORDER: List[str] = ["pending", "emailed", "email_sent", "completed"]
+MATCH_STATUS_ORDER: List[str] = [
+    "pending",
+    "emailed",
+    "email_sent",
+    "accepted",
+    "meeting_scheduled",
+    "completed",
+]
+# Terminal side-branch (mentor declined); not part of the forward order.
+DECLINED_STATUS = "declined"
+
+# Status groups shared by the stats endpoints and the mentor views.
+REQUEST_STATUSES: List[str] = ["pending", "emailed", "email_sent"]
+ACCEPTED_STATUSES: List[str] = ["accepted", "meeting_scheduled", "completed"]
+MEETING_STATUSES: List[str] = ["meeting_scheduled", "completed"]
+EMAIL_SENT_OR_LATER: List[str] = MATCH_STATUS_ORDER[MATCH_STATUS_ORDER.index("email_sent"):]
 
 
 def profile_fingerprint(profile: StartupProfile) -> str:
@@ -81,6 +105,8 @@ def record_matches(
                     "$set": {
                         "startup_profile": profile_dict,
                         "score": match.match_score,
+                        "mentor_name": match.name,
+                        "mentor_email": match.email,
                         "updated_at": now,
                     },
                     "$setOnInsert": {
@@ -128,3 +154,54 @@ def advance_match_status(match_id: Optional[str], user_id: str, new_status: str)
         return False
 
     return result.modified_count > 0
+
+
+def _object_ids(raw_ids: Iterable[Any]) -> List[ObjectId]:
+    out: List[ObjectId] = []
+    for raw in raw_ids:
+        try:
+            oid = ObjectId(str(raw))
+        except (InvalidId, TypeError):
+            continue
+        if oid not in out:
+            out.append(oid)
+    return out
+
+
+def enrich_match_docs(docs: List[Dict[str, Any]], include_startup_email: bool = False) -> List[Dict[str, Any]]:
+    """Backfill display fields on (already JSON-safe) match documents.
+
+    * `mentor_name` - looked up from the mentors collection for documents
+      that predate it being stored by /match (None if the mentor is gone).
+    * `startup_email` - with `include_startup_email`, looked up from the
+      users collection via the match's `user_id`.
+
+    Lookups are batched (one query per collection) and failures are logged
+    and tolerated: missing display data must not fail a listing.
+    """
+    missing_names = [doc.get("mentor_id") for doc in docs if not doc.get("mentor_name")]
+    names: Dict[str, Optional[str]] = {}
+    mentor_oids = _object_ids(missing_names)
+    if mentor_oids:
+        try:
+            for mentor in get_mentors_collection().find({"_id": {"$in": mentor_oids}}, {"name": 1}):
+                names[str(mentor["_id"])] = mentor.get("name")
+        except Exception:
+            logger.exception("Failed to backfill mentor names for match listing")
+
+    emails: Dict[str, Optional[str]] = {}
+    if include_startup_email:
+        user_oids = _object_ids(doc.get("user_id") for doc in docs)
+        if user_oids:
+            try:
+                for user in get_users_collection().find({"_id": {"$in": user_oids}}, {"email": 1}):
+                    emails[str(user["_id"])] = user.get("email")
+            except Exception:
+                logger.exception("Failed to look up startup emails for match listing")
+
+    for doc in docs:
+        if not doc.get("mentor_name"):
+            doc["mentor_name"] = names.get(str(doc.get("mentor_id") or ""))
+        if include_startup_email:
+            doc["startup_email"] = emails.get(str(doc.get("user_id") or ""))
+    return docs

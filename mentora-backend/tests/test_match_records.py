@@ -79,7 +79,7 @@ def test_email_advances_match_to_emailed(client, fake_mongo, monkeypatch):
     monkeypatch.setattr(
         email_router,
         "generate_intro_email",
-        lambda profile, mentor: EmailResponse(subject="Hi", body="Body"),
+        lambda profile, mentor, founder_name="Founder": EmailResponse(subject="Hi", body="Body"),
     )
     seed_mentor(fake_mongo)
 
@@ -105,7 +105,7 @@ def test_email_without_match_id_still_works(client, monkeypatch):
     monkeypatch.setattr(
         email_router,
         "generate_intro_email",
-        lambda profile, mentor: EmailResponse(subject="Hi", body="Body"),
+        lambda profile, mentor, founder_name="Founder": EmailResponse(subject="Hi", body="Body"),
     )
 
     token = register(client, STARTUP_PAYLOAD)
@@ -126,7 +126,7 @@ def test_email_cannot_advance_another_users_match(client, fake_mongo, monkeypatc
     monkeypatch.setattr(
         email_router,
         "generate_intro_email",
-        lambda profile, mentor: EmailResponse(subject="Hi", body="Body"),
+        lambda profile, mentor, founder_name="Founder": EmailResponse(subject="Hi", body="Body"),
     )
 
     _matches(fake_mongo).insert_one(

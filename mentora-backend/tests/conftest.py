@@ -53,6 +53,21 @@ def no_embedding_model(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_groq_deck_feedback(monkeypatch):
+    """/extract's second (deck feedback) Groq call never hits the network in
+    tests; by default it fails, so /extract returns the default feedback.
+    Tests that need real feedback monkeypatch `llm._call_groq_feedback`."""
+    from fastapi import HTTPException
+
+    from app.services import llm
+
+    def unavailable(_prompt):
+        raise HTTPException(status_code=502, detail="Deck feedback is unavailable.")
+
+    monkeypatch.setattr(llm, "_call_groq_feedback", unavailable)
+
+
+@pytest.fixture(autouse=True)
 def reset_rate_limits():
     """Rate-limit state is process-global; clear it between tests."""
     rate_limit.reset_all_limiters()
@@ -90,6 +105,12 @@ MENTOR_PAYLOAD = {
     },
 }
 
+COORDINATOR_PAYLOAD = {
+    "email": "coord@example.com",
+    "password": "correct-horse",
+    "role": "coordinator",
+}
+
 # A pitch-deck text comfortably above /extract's 100-character minimum.
 DECK_TEXT = (
     "Acme is a Fintech startup at MVP stage. We help small merchants in India "
@@ -116,3 +137,37 @@ def seed_mentor(fake_mongo, **fields) -> str:
     doc.update(fields)
     collection = fake_mongo[settings.MONGODB_DB_NAME][settings.MONGODB_MENTORS_COLLECTION]
     return str(collection.insert_one(doc).inserted_id)
+
+
+def db(fake_mongo):
+    from app.config import settings
+
+    return fake_mongo[settings.MONGODB_DB_NAME]
+
+
+def me(client, token) -> dict:
+    response = client.get("/me", headers=auth_header(token))
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def insert_match(fake_mongo, *, user_id: str, mentor_id: str, status: str = "pending", **fields) -> dict:
+    """Insert a match document directly and return it (with its _id)."""
+    from uuid import uuid4
+
+    from app.config import settings
+
+    doc = {
+        "match_id": str(uuid4()),
+        # Unique per doc so the (user_id, mentor_id, fingerprint) index allows several.
+        "profile_fingerprint": uuid4().hex,
+        "user_id": user_id,
+        "mentor_id": mentor_id,
+        "status": status,
+        "score": 0.8,
+        "startup_profile": {"domain": "Fintech", "stage": "MVP", "challenges": [], "team_gaps": []},
+        "timestamp": "2026-10-01T10:00:00+00:00",
+    }
+    doc.update(fields)
+    fake_mongo[settings.MONGODB_DB_NAME][settings.MONGODB_MATCHES_COLLECTION].insert_one(doc)
+    return doc

@@ -21,6 +21,11 @@ export const SECTOR_OPTIONS = [
   "Others",
 ];
 
+/** UI label for a sector value — the backend's "Others" is shown as "Other". */
+export function sectorLabel(value) {
+  return value === "Others" ? "Other" : value;
+}
+
 export const GEOGRAPHY_OPTIONS = ["Bangalore", "Mumbai", "Delhi", "Hyderabad", "Chennai", "Other"];
 export const EXPERIENCE_OPTIONS = ["1-3", "3-5", "5-10", "10+"];
 export const CAPACITY_OPTIONS = ["1", "2", "3", "5+"];
@@ -59,9 +64,13 @@ export function validateUploadFile(file) {
   return null;
 }
 
+/**
+ * Sign-up rules. A full name is required for mentors (the backend needs
+ * `profile.name`) and optional for startups/coordinators.
+ */
 export function validateRegistration({ role, name, email, password, sectorExpertise }) {
   const errors = {};
-  if (!name || !name.trim()) errors.name = "Enter your name.";
+  if (role === "mentor" && (!name || !name.trim())) errors.name = "Enter your full name.";
   if (!email || !email.trim()) errors.email = "Enter your email address.";
   else if (!isValidEmail(email)) errors.email = "Enter a valid email address, like you@company.com.";
   if (!password) errors.password = "Choose a password.";
@@ -76,6 +85,7 @@ export function validateRegistration({ role, name, email, password, sectorExpert
 
 /** Per-step validation for the 4-step mentor onboarding flow (1-indexed). */
 export function validateOnboardingStep(step, data) {
+  // Accepts 1-indexed steps (1-3 carry fields; 4 is the review step).
   const errors = {};
   if (step === 1) {
     if (!data.name || !data.name.trim()) errors.name = "Enter your full name.";

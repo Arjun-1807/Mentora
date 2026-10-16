@@ -1,6 +1,6 @@
 export const metadata = {
   title: "Create an account",
-  description: "Join Mentora as a startup founder or as a mentor.",
+  description: "Join Mentora as a startup founder, a mentor or an incubator coordinator.",
 };
 
 export default function RegisterLayout({ children }) {

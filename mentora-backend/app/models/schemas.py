@@ -3,21 +3,29 @@ Pydantic models shared across the API: request/response bodies for
 /extract, /match, /email, /feedback and the auth endpoints, plus the
 internal mentor representation.
 """
+import re
+from datetime import date as date_type
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, EmailStr, Field, StrictBool, field_validator
+from pydantic import BaseModel, EmailStr, Field, StrictBool, field_validator, model_validator
 
 StartupStage = Literal["idea", "MVP", "growth"]
 # A mentor may focus on one stage or on all of them.
 MentorStage = Literal["idea", "MVP", "growth", "all"]
-UserRole = Literal["startup", "mentor"]
+# "coordinator" = incubator staff: no profile, sees the cohort health view.
+UserRole = Literal["startup", "mentor", "coordinator"]
 
 # Match lifecycle vocabulary (see README "Match status lifecycle"):
 #   pending    -> created by POST /match, no outreach yet
 #   emailed    -> an intro email was drafted for it via POST /email
 #   email_sent -> the intro email was actually delivered (POST /feedback-status)
+#   accepted   -> the mentor accepted the request (PATCH /mentor/matches/{id})
+#   meeting_scheduled -> a Google Calendar meeting was booked (POST /calendar/book)
 #   completed  -> feedback was submitted for it via POST /feedback
-MatchStatus = Literal["pending", "emailed", "email_sent", "completed"]
+#   declined   -> terminal side-branch, set by the mentor
+MatchStatus = Literal[
+    "pending", "emailed", "email_sent", "accepted", "meeting_scheduled", "completed", "declined"
+]
 
 # Statuses a client may set directly via POST /feedback-status.
 # "completed" is deliberately excluded: it is only reachable via /feedback.
@@ -60,10 +68,74 @@ class StartupProfile(BaseModel):
     geography: Optional[str] = Field(default=None, description="Startup's geography, e.g. 'San Francisco, CA'")
 
 
+MAX_IMPROVEMENT_TIPS = 3
+DEFAULT_CONFIDENCE_SCORE = 60
+
+
+def _coerce_str_list(value: Any) -> List[str]:
+    """Lenient list-of-strings coercion for LLM output: a bare string becomes
+    a one-item list, non-string items are stringified, blanks are dropped."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("must be a list of strings")
+    cleaned: List[str] = []
+    for item in value:
+        if item is None or isinstance(item, (dict, list)):
+            continue
+        text = str(item).strip()
+        if text:
+            cleaned.append(text)
+    return cleaned
+
+
+class DeckFeedback(BaseModel):
+    """LLM assessment of how useful an extracted profile is for matching
+    (the `deck_feedback` field of POST /extract)."""
+
+    confidence_score: int = Field(..., ge=0, le=100)
+    strong_signals: List[str] = Field(default_factory=list)
+    weak_signals: List[str] = Field(default_factory=list)
+    improvement_tips: List[str] = Field(default_factory=list, max_length=MAX_IMPROVEMENT_TIPS)
+
+    @field_validator("confidence_score", mode="before")
+    @classmethod
+    def _clamp_score(cls, value: Any) -> int:
+        if isinstance(value, bool) or value is None:
+            raise ValueError("confidence_score must be a number")
+        if isinstance(value, str):
+            value = value.strip().rstrip("%")
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("confidence_score must be a number") from exc
+        if number != number:  # NaN
+            raise ValueError("confidence_score must be a number")
+        return int(round(min(100.0, max(0.0, number))))
+
+    @field_validator("strong_signals", "weak_signals", mode="before")
+    @classmethod
+    def _signals(cls, value: Any) -> List[str]:
+        return _coerce_str_list(value)
+
+    @field_validator("improvement_tips", mode="before")
+    @classmethod
+    def _tips(cls, value: Any) -> List[str]:
+        return _coerce_str_list(value)[:MAX_IMPROVEMENT_TIPS]
+
+    @classmethod
+    def default(cls) -> "DeckFeedback":
+        return cls(confidence_score=DEFAULT_CONFIDENCE_SCORE)
+
+
 class ExtractResponse(StartupProfile):
-    """Response body for POST /extract. Same shape as StartupProfile today,
-    kept as a distinct model so the API contract can evolve independently."""
-    pass
+    """Response body for POST /extract: the StartupProfile fields plus
+    `deck_feedback` (always present; a neutral default if the feedback
+    LLM call failed)."""
+
+    deck_feedback: DeckFeedback = Field(default_factory=DeckFeedback.default)
 
 
 class MentorMatch(BaseModel):
@@ -383,3 +455,166 @@ class MeResponse(BaseModel):
         default=None, description="Linked mentors-collection _id, for users registered as mentors"
     )
     created_at: Optional[str] = None
+    calendar_connected: bool = Field(
+        default=False, description="True once the user has connected Google Calendar"
+    )
+
+
+# --- Google Calendar ---------------------------------------------------------
+
+Weekday = Literal["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+WEEKDAYS: List[str] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+_HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+MAX_AVAILABILITY_SLOTS = 100
+MAX_BOOKING_DESCRIPTION_LENGTH = 2000
+
+
+def _validate_hhmm(value: str) -> str:
+    if not isinstance(value, str) or not _HHMM.match(value.strip()):
+        raise ValueError("must be a 24-hour time in HH:MM format")
+    return value.strip()
+
+
+class _TimeRange(BaseModel):
+    start_time: str
+    end_time: str
+
+    @field_validator("start_time", "end_time")
+    @classmethod
+    def _hhmm(cls, value: str) -> str:
+        return _validate_hhmm(value)
+
+    @model_validator(mode="after")
+    def _start_before_end(self):
+        # Zero-padded HH:MM strings compare correctly as strings.
+        if self.start_time >= self.end_time:
+            raise ValueError("start_time must be before end_time")
+        return self
+
+
+class AvailabilitySlot(_TimeRange):
+    """One weekly recurring availability window of a mentor."""
+
+    day: Weekday
+
+
+class AvailabilitySlotsRequest(BaseModel):
+    slots: List[AvailabilitySlot] = Field(..., max_length=MAX_AVAILABILITY_SLOTS)
+
+
+class AvailabilitySlotsResponse(BaseModel):
+    slots: List[AvailabilitySlot]
+
+
+class CalendarAuthUrlResponse(BaseModel):
+    auth_url: str
+
+
+class CalendarCallbackRequest(BaseModel):
+    code: str = Field(..., min_length=1)
+    state: str = Field(..., min_length=1)
+
+
+class CalendarCallbackResponse(BaseModel):
+    success: bool
+    role: Optional[str] = None
+
+
+class CalendarStatusResponse(BaseModel):
+    connected: bool
+
+
+class BookingSlot(_TimeRange):
+    date: str = Field(..., description="YYYY-MM-DD, interpreted in CALENDAR_TIMEZONE")
+
+    @field_validator("date")
+    @classmethod
+    def _iso_date(cls, value: str) -> str:
+        value = (value or "").strip()
+        try:
+            if len(value) != 10:
+                raise ValueError
+            date_type.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("date must be a valid YYYY-MM-DD date") from exc
+        return value
+
+
+class BookingRequest(BaseModel):
+    mentor_id: str = Field(..., min_length=1)
+    match_id: str = Field(..., min_length=1, description="The uuid match_id returned by /match")
+    slot: BookingSlot
+    description: Optional[str] = Field(default=None, max_length=MAX_BOOKING_DESCRIPTION_LENGTH)
+
+
+class BookingResponse(BaseModel):
+    success: bool
+    event_id: str
+    meet_link: Optional[str] = None
+    html_link: Optional[str] = None
+    title: str
+    start: str
+    end: str
+
+
+# --- Startup health score ------------------------------------------------------
+
+class HealthLogRequest(BaseModel):
+    match_id: str = Field(..., min_length=1)
+    momentum_score: int = Field(..., ge=1, le=5, strict=True)
+    blockers_resolved: StrictBool
+    mentor_engagement: int = Field(..., ge=1, le=5, strict=True)
+    notes: Optional[str] = Field(default=None, max_length=2000)
+
+
+HealthTrend = Literal["up", "down", "stable"]
+
+
+class HealthLogResponse(BaseModel):
+    health_score: float
+    trend: HealthTrend
+
+
+class HealthHistoryEntry(BaseModel):
+    score: float
+    timestamp: Optional[str] = None
+
+
+class HealthResponse(BaseModel):
+    health_score: Optional[float] = None
+    trend: HealthTrend = "stable"
+    health_history: List[HealthHistoryEntry] = Field(default_factory=list)
+    last_updated: Optional[str] = None
+
+
+class CohortStartup(BaseModel):
+    user_id: str
+    email: Optional[str] = None
+    domain: Optional[str] = None
+    stage: Optional[str] = None
+    health_score: Optional[float] = None
+    trend: HealthTrend = "stable"
+    match_count: int = 0
+    meeting_count: int = 0
+    last_activity: Optional[str] = None
+    health_history: List[HealthHistoryEntry] = Field(default_factory=list)
+
+
+class CohortResponse(BaseModel):
+    startups: List[CohortStartup]
+
+
+# --- Dashboard stats -------------------------------------------------------------
+
+class DashboardStatsResponse(BaseModel):
+    total_matches: int
+    emails_sent: int
+    meetings_accepted: int
+    avg_rating: Optional[float] = None
+
+
+class MentorStatsResponse(BaseModel):
+    pending_requests: int
+    accepted: int
+    avg_rating: Optional[float] = None
+    total_helped: int

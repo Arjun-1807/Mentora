@@ -43,6 +43,14 @@ def get_users_collection() -> Collection:
     return get_database()[settings.MONGODB_USERS_COLLECTION]
 
 
+def get_oauth_states_collection() -> Collection:
+    return get_database()[settings.MONGODB_OAUTH_STATES_COLLECTION]
+
+
+def get_meeting_notes_collection() -> Collection:
+    return get_database()[settings.MONGODB_MEETING_NOTES_COLLECTION]
+
+
 def _safe_create_index(collection: Collection, keys: list, **kwargs) -> None:
     """Create one index, logging (not raising) on failure.
 
@@ -73,6 +81,11 @@ def ensure_indexes() -> None:
                                    -> de-duplicates repeated /match calls.
     - feedback.match_id     unique -> one feedback per match (idempotency).
     - feedback.mentor_id           -> effectiveness_score aggregation.
+    - oauth_states.state    unique -> one-time Google OAuth state tokens.
+    - oauth_states.created_at  TTL -> abandoned states expire on their own
+                                      (the callback also checks the age).
+    - meeting_notes (startup_id, timestamp) -> health score computation.
+    - meeting_notes.match_id       -> per-match note lookups.
     """
     users = get_users_collection()
     matches = get_matches_collection()
@@ -98,4 +111,23 @@ def ensure_indexes() -> None:
     _safe_create_index(feedback, [("match_id", ASCENDING)], unique=True, name="uniq_match_id")
     _safe_create_index(feedback, [("mentor_id", ASCENDING)], name="mentor_id")
 
-    logger.info("MongoDB index creation attempted for users/matches/feedback")
+    oauth_states = get_oauth_states_collection()
+    _safe_create_index(oauth_states, [("state", ASCENDING)], unique=True, name="uniq_state")
+    _safe_create_index(
+        oauth_states,
+        [("created_at", ASCENDING)],
+        expireAfterSeconds=settings.OAUTH_STATE_TTL_SECONDS,
+        name="ttl_created_at",
+    )
+
+    meeting_notes = get_meeting_notes_collection()
+    _safe_create_index(
+        meeting_notes,
+        [("startup_id", ASCENDING), ("timestamp", DESCENDING)],
+        name="startup_id_timestamp",
+    )
+    _safe_create_index(meeting_notes, [("match_id", ASCENDING)], name="match_id")
+
+    logger.info(
+        "MongoDB index creation attempted for users/matches/feedback/oauth_states/meeting_notes"
+    )

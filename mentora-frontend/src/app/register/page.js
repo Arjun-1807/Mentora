@@ -1,37 +1,44 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
-import { PageShell } from "@/components/PageShell";
+import { AnimatePresence, motion } from "framer-motion";
+import { Building2, GraduationCap, Loader2, Rocket } from "lucide-react";
+import AuthSplitLayout from "@/components/layout/AuthSplitLayout";
 import { InlineError } from "@/components/StateCard";
-import { HoverCard } from "@/components/motion";
-import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-  CardContent,
-} from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Loader2 } from "lucide-react";
-import { register, tokenFromAuthResponse } from "@/lib/api";
-import { setToken, setUserRole } from "@/lib/storage";
-import { MIN_PASSWORD_LENGTH, SECTOR_OPTIONS, validateRegistration } from "@/lib/validation";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  FieldError,
+  SectorMultiSelect,
+  SelectField,
+} from "@/app/onboarding/mentor/_components/fields";
+import { register, startSession } from "@/lib/api";
+import { roleHome } from "@/lib/storage";
+import {
+  AVAILABILITY_OPTIONS,
+  GEOGRAPHY_OPTIONS,
+  MIN_PASSWORD_LENGTH,
+  STAGE_OPTIONS,
+  validateRegistration,
+} from "@/lib/validation";
 
-function FieldError({ id, message }) {
-  if (!message) return null;
-  return (
-    <p id={id} role="alert" className="text-xs text-destructive">
-      {message}
-    </p>
-  );
-}
+const ROLES = [
+  { value: "startup", label: "Startup", icon: Rocket },
+  { value: "mentor", label: "Mentor", icon: GraduationCap },
+  { value: "coordinator", label: "Coordinator", icon: Building2 },
+];
+
+const ROLE_COPY = {
+  startup: "Upload your deck and get matched with mentors in seconds.",
+  mentor: "Share your expertise with founders who need it.",
+  coordinator: "Track how every startup in your cohort is doing.",
+};
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -44,6 +51,22 @@ export default function RegisterPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [sectorExpertise, setSectorExpertise] = useState([]);
+  const [pastExits, setPastExits] = useState("");
+  const [stageFocus, setStageFocus] = useState("");
+  const [geography, setGeography] = useState("");
+  const [availability, setAvailability] = useState("");
+
+  // "/register?role=mentor" (the landing page's "For Mentors" button) preselects the tab.
+  useEffect(() => {
+    try {
+      const requested = new URLSearchParams(window.location.search).get("role");
+      if (ROLES.some((r) => r.value === requested)) setRole(requested);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const isMentor = role === "mentor";
 
   function clearFieldError(field) {
     setFieldErrors((prev) => {
@@ -54,11 +77,29 @@ export default function RegisterPage() {
     });
   }
 
-  function toggleSector(sector) {
-    clearFieldError("sectorExpertise");
-    setSectorExpertise((prev) =>
-      prev.includes(sector) ? prev.filter((s) => s !== sector) : [...prev, sector]
-    );
+  function handlePasswordBlur() {
+    if (password && password.length < MIN_PASSWORD_LENGTH) {
+      setFieldErrors((prev) => ({
+        ...prev,
+        password: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`,
+      }));
+    }
+  }
+
+  function buildProfile() {
+    const trimmedName = name.trim();
+    if (!isMentor) return trimmedName ? { name: trimmedName } : {};
+    // Mentors give the basics here; /onboarding/mentor collects the rest
+    // (and is pre-filled with these values).
+    const profile = { name: trimmedName, sector_expertise: sectorExpertise };
+    if (pastExits.trim()) profile.past_exits = pastExits.trim();
+    if (stageFocus) {
+      profile.stage_focus = stageFocus;
+      profile.preferred_stages = [stageFocus];
+    }
+    if (geography) profile.geography = geography;
+    if (availability) profile.availability = availability;
+    return profile;
   }
 
   async function handleSubmit(e) {
@@ -72,30 +113,32 @@ export default function RegisterPage() {
       return;
     }
 
-    // Mentors only give the basics here; the rest of their profile is
-    // collected by the /onboarding/mentor flow right after sign-up.
-    const profile =
-      role === "mentor"
-        ? { name: name.trim(), sector_expertise: sectorExpertise }
-        : { name: name.trim() };
-
     setLoading(true);
     setError("");
     try {
-      const data = await register({ email: email.trim(), password, role, profile });
-      const token = tokenFromAuthResponse(data);
-      if (token) {
-        setToken(token);
-        setUserRole(role);
-        toast.success("Account created.");
-        router.push(role === "mentor" ? "/onboarding/mentor" : "/upload");
-      } else {
+      const data = await register({
+        email: email.trim(),
+        password,
+        role,
+        profile: buildProfile(),
+      });
+      const session = await startSession(data, { email: email.trim(), fallbackRole: role });
+      if (!session) {
         toast.success("Account created. Please sign in.");
         router.push("/login");
+        return;
+      }
+      const finalRole = session.role || role;
+      if (finalRole === "mentor") {
+        toast.success("Account created. Let's finish your mentor profile.");
+        router.push("/onboarding/mentor");
+      } else {
+        toast.success("Account created.");
+        router.push(roleHome(finalRole));
       }
     } catch (err) {
       if (err.status === 409) {
-        setFieldErrors({ email: "Account already exists." });
+        setFieldErrors({ email: "An account with this email already exists." });
       } else {
         setError(err.message || "Could not create account.");
       }
@@ -104,150 +147,196 @@ export default function RegisterPage() {
   }
 
   return (
-    <PageShell width="lg" center>
-      <HoverCard>
-        <Card>
-          <CardHeader>
-            <CardTitle>Create an account</CardTitle>
-            <CardDescription>Join Mentora as a startup or a mentor.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Tabs value={role} onValueChange={setRole}>
-              <TabsList className="w-full">
-                <TabsTrigger value="startup" className="flex-1" disabled={loading}>
-                  Startup
-                </TabsTrigger>
-                <TabsTrigger value="mentor" className="flex-1" disabled={loading}>
-                  Mentor
-                </TabsTrigger>
-              </TabsList>
+    <AuthSplitLayout>
+      <Card className="shadow-xl shadow-black/20">
+        <CardHeader>
+          <CardTitle className="text-xl font-semibold">Create your account</CardTitle>
+          <CardDescription>{ROLE_COPY[role]}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Tabs
+            value={role}
+            onValueChange={(value) => {
+              setRole(value);
+              setFieldErrors({});
+              setError("");
+            }}
+          >
+            <TabsList className="h-10! w-full" aria-label="Account type">
+              {ROLES.map((r) => {
+                const Icon = r.icon;
+                return (
+                  <TabsTrigger key={r.value} value={r.value} disabled={loading} className="flex-1">
+                    <Icon aria-hidden="true" />
+                    {r.label}
+                  </TabsTrigger>
+                );
+              })}
+            </TabsList>
+          </Tabs>
 
-              <form onSubmit={handleSubmit} noValidate className="space-y-4 mt-6">
-                <div className="space-y-1.5">
-                  <Label htmlFor="register-name">Name</Label>
-                  <Input
-                    id="register-name"
-                    name="name"
-                    autoComplete="name"
-                    value={name}
-                    onChange={(e) => {
-                      setName(e.target.value);
-                      clearFieldError("name");
-                    }}
-                    aria-invalid={Boolean(fieldErrors.name) || undefined}
-                    aria-describedby={fieldErrors.name ? "register-name-error" : undefined}
-                    disabled={loading}
-                  />
-                  <FieldError id="register-name-error" message={fieldErrors.name} />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="register-email">Email</Label>
-                  <Input
-                    id="register-email"
-                    name="email"
-                    type="email"
-                    autoComplete="email"
-                    value={email}
-                    onChange={(e) => {
-                      setEmail(e.target.value);
-                      clearFieldError("email");
-                    }}
-                    aria-invalid={Boolean(fieldErrors.email) || undefined}
-                    aria-describedby={fieldErrors.email ? "register-email-error" : undefined}
-                    disabled={loading}
-                  />
-                  <FieldError id="register-email-error" message={fieldErrors.email} />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="register-password">Password</Label>
-                  <Input
-                    id="register-password"
-                    name="password"
-                    type="password"
-                    autoComplete="new-password"
-                    aria-invalid={Boolean(fieldErrors.password) || undefined}
-                    aria-describedby={
-                      fieldErrors.password ? "register-password-error" : "register-password-hint"
-                    }
-                    value={password}
-                    onChange={(e) => {
-                      setPassword(e.target.value);
-                      clearFieldError("password");
-                    }}
-                    disabled={loading}
-                  />
-                  {fieldErrors.password ? (
-                    <FieldError id="register-password-error" message={fieldErrors.password} />
-                  ) : (
-                    <p id="register-password-hint" className="text-xs text-muted-foreground">
-                      At least {MIN_PASSWORD_LENGTH} characters.
+          <form onSubmit={handleSubmit} noValidate className="mt-6 space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="register-name">
+                Full name
+                {!isMentor && <span className="font-normal text-muted-foreground">(optional)</span>}
+              </Label>
+              <Input
+                id="register-name"
+                name="name"
+                autoComplete="name"
+                className="h-10"
+                value={name}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  clearFieldError("name");
+                }}
+                aria-invalid={Boolean(fieldErrors.name) || undefined}
+                aria-describedby={fieldErrors.name ? "register-name-error" : undefined}
+                disabled={loading}
+              />
+              <FieldError id="register-name-error" message={fieldErrors.name} />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="register-email">Email</Label>
+              <Input
+                id="register-email"
+                name="email"
+                type="email"
+                autoComplete="email"
+                placeholder="you@company.com"
+                className="h-10"
+                value={email}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  clearFieldError("email");
+                }}
+                aria-invalid={Boolean(fieldErrors.email) || undefined}
+                aria-describedby={fieldErrors.email ? "register-email-error" : undefined}
+                disabled={loading}
+              />
+              <FieldError id="register-email-error" message={fieldErrors.email} />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="register-password">Password</Label>
+              <Input
+                id="register-password"
+                name="password"
+                type="password"
+                autoComplete="new-password"
+                className="h-10"
+                value={password}
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  if (e.target.value.length >= MIN_PASSWORD_LENGTH) clearFieldError("password");
+                }}
+                onBlur={handlePasswordBlur}
+                aria-invalid={Boolean(fieldErrors.password) || undefined}
+                aria-describedby={
+                  fieldErrors.password ? "register-password-error" : "register-password-hint"
+                }
+                disabled={loading}
+              />
+              {fieldErrors.password ? (
+                <FieldError id="register-password-error" message={fieldErrors.password} />
+              ) : (
+                <p id="register-password-hint" className="text-xs text-muted-foreground">
+                  At least {MIN_PASSWORD_LENGTH} characters.
+                </p>
+              )}
+            </div>
+
+            <AnimatePresence initial={false}>
+              {isMentor && (
+                <motion.div
+                  key="mentor-fields"
+                  initial={{ opacity: 0, height: 0, y: -8 }}
+                  animate={{ opacity: 1, height: "auto", y: 0 }}
+                  exit={{ opacity: 0, height: 0, y: -8 }}
+                  transition={{ duration: 0.3, ease: "easeOut" }}
+                  className="-mx-1 overflow-hidden px-1 pb-1"
+                >
+                  <div className="space-y-4 border-t border-border pt-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-primary">
+                      Mentor details
                     </p>
-                  )}
-                </div>
-
-                <TabsContent value="mentor" className="space-y-4 mt-0">
-                  <fieldset
-                    className="space-y-1.5"
-                    disabled={loading}
-                    aria-describedby={
-                      fieldErrors.sectorExpertise ? "register-sectors-error" : "register-sectors-hint"
-                    }
-                  >
-                    <legend className="text-sm font-medium leading-none mb-2">
-                      Sector expertise
-                    </legend>
-                    <div className="flex flex-wrap gap-2">
-                      {SECTOR_OPTIONS.map((sector) => {
-                        const active = sectorExpertise.includes(sector);
-                        return (
-                          <Badge
-                            key={sector}
-                            variant={active ? "default" : "outline"}
-                            className="cursor-pointer select-none px-2.5 py-1 h-auto"
-                            render={
-                              <button
-                                type="button"
-                                aria-pressed={active}
-                                onClick={() => toggleSector(sector)}
-                              />
-                            }
-                          >
-                            {sector}
-                          </Badge>
-                        );
-                      })}
-                    </div>
-                    {fieldErrors.sectorExpertise ? (
-                      <FieldError
-                        id="register-sectors-error"
-                        message={fieldErrors.sectorExpertise}
+                    <SectorMultiSelect
+                      id="register-sectors"
+                      value={sectorExpertise}
+                      onChange={(v) => {
+                        setSectorExpertise(v);
+                        clearFieldError("sectorExpertise");
+                      }}
+                      error={fieldErrors.sectorExpertise}
+                      hint="Pick at least one. You'll complete the rest of your profile next."
+                      disabled={loading}
+                    />
+                    <div className="space-y-1.5">
+                      <Label htmlFor="register-exits">
+                        Past exits
+                        <span className="font-normal text-muted-foreground">(optional)</span>
+                      </Label>
+                      <Input
+                        id="register-exits"
+                        className="h-10"
+                        placeholder="e.g. Exited Series B SaaS in 2021"
+                        value={pastExits}
+                        onChange={(e) => setPastExits(e.target.value)}
+                        disabled={loading}
                       />
-                    ) : (
-                      <p id="register-sectors-hint" className="text-xs text-muted-foreground">
-                        Pick at least one. You&apos;ll add the rest of your profile next.
-                      </p>
-                    )}
-                  </fieldset>
-                </TabsContent>
+                    </div>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <SelectField
+                        id="register-stage"
+                        label="Stage focus"
+                        value={stageFocus}
+                        onChange={setStageFocus}
+                        options={STAGE_OPTIONS}
+                        placeholder="Any stage"
+                        disabled={loading}
+                      />
+                      <SelectField
+                        id="register-geography"
+                        label="Geography"
+                        value={geography}
+                        onChange={setGeography}
+                        options={GEOGRAPHY_OPTIONS}
+                        placeholder="Select city"
+                        disabled={loading}
+                      />
+                    </div>
+                    <SelectField
+                      id="register-availability"
+                      label="Availability"
+                      value={availability}
+                      onChange={setAvailability}
+                      options={AVAILABILITY_OPTIONS}
+                      placeholder="Select availability"
+                      disabled={loading}
+                    />
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
-                {error && <InlineError message={error} />}
+            {error && <InlineError message={error} className="rounded-lg" />}
 
-                <Button type="submit" className="w-full" disabled={loading}>
-                  {loading && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
-                  {loading ? "Creating account…" : "Create Account"}
-                </Button>
-              </form>
-            </Tabs>
+            <Button type="submit" className="h-10 w-full" disabled={loading}>
+              {loading && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+              {loading ? "Creating account…" : "Create Account"}
+            </Button>
+          </form>
 
-            <p className="mt-6 text-center text-sm text-muted-foreground">
-              Already have an account?{" "}
-              <Link href="/login" className="text-primary hover:underline">
-                Sign in
-              </Link>
-            </p>
-          </CardContent>
-        </Card>
-      </HoverCard>
-    </PageShell>
+          <p className="mt-6 text-center text-sm text-muted-foreground">
+            Already have an account?{" "}
+            <Link href="/login" className="font-medium text-primary hover:underline">
+              Sign in
+            </Link>
+          </p>
+        </CardContent>
+      </Card>
+    </AuthSplitLayout>
   );
 }
