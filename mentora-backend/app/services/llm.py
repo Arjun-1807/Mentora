@@ -37,6 +37,9 @@ SYSTEM_PROMPT = (
     "startup currently faces.\n"
     '  "team_gaps": a list of short strings describing skill or role gaps in '
     "the founding team.\n"
+    '  "geography": the city where the startup is based, as a plain city name '
+    '(e.g. "Bangalore", "Mumbai", "London"), "Remote" if the team is fully remote, '
+    "or null if the document does not say. Do not guess.\n"
     "Return valid JSON and nothing else."
 )
 
@@ -51,9 +54,10 @@ STRICT_SYSTEM_PROMPT = (
     '  "stage": string, one of exactly "idea", "MVP", "growth" (case-sensitive)\n'
     '  "challenges": array of strings (may be empty)\n'
     '  "team_gaps": array of strings (may be empty)\n'
+    '  "geography": string city name, "Remote", or null\n'
     "Example of the required shape:\n"
     '{"sectors": ["HealthTech"], "domain": "HealthTech", "stage": "MVP", '
-    '"challenges": ["Clinical validation"], "team_gaps": ["No CTO"]}'
+    '"challenges": ["Clinical validation"], "team_gaps": ["No CTO"], "geography": "Bangalore"}'
 )
 
 # Client-facing message when both attempts fail validation.

@@ -346,6 +346,51 @@ def apply_eligibility(candidates: List[dict], now: Optional[datetime] = None) ->
     return onboarded, full
 
 
+# --- geography ------------------------------------------------------------------
+
+# City aliases (normalised: lowercase, no punctuation) -> canonical city.
+_CITY_ALIASES = {
+    "bengaluru": "bangalore", "blr": "bangalore",
+    "bombay": "mumbai", "navi mumbai": "mumbai",
+    "new delhi": "delhi", "delhi ncr": "delhi", "ncr": "delhi", "gurgaon": "delhi", "gurugram": "delhi",
+    "noida": "delhi",
+    "madras": "chennai", "calcutta": "kolkata", "poona": "pune",
+    "nyc": "new york", "new york city": "new york", "manhattan": "new york",
+    "sf": "san francisco", "bay area": "san francisco", "san francisco bay area": "san francisco",
+}
+REMOTE = "remote"
+# Placeholder answers that say nothing about location.
+_NO_LOCATION = {"", "other", "others", "unknown", "n/a", "na", "none", "null", "global", "worldwide"}
+GEOGRAPHY_REMOTE_SCORE = 0.5
+
+
+def normalise_geography(value: Optional[str]) -> str:
+    """Canonical city for a geography string ("" if unknown, "remote").
+
+    "Bangalore, India", "Bengaluru" and "bangalore" all become "bangalore":
+    only the part before the first comma is kept, then aliases apply.
+    """
+    raw = (value or "").strip().lower()
+    if not raw:
+        return ""
+    if REMOTE in raw.replace("-", " ").split() or raw.startswith(REMOTE):
+        return REMOTE
+    city = raw.split(",")[0].strip()
+    city = " ".join("".join(ch if ch.isalnum() else " " for ch in city).split())
+    city = _CITY_ALIASES.get(city, city)
+    return "" if city in _NO_LOCATION else city
+
+
+def geography_score(startup_geography: Optional[str], mentor_geography: Optional[str]) -> float:
+    """1.0 same city, GEOGRAPHY_REMOTE_SCORE if either side is remote, else 0."""
+    startup, mentor = normalise_geography(startup_geography), normalise_geography(mentor_geography)
+    if not startup or not mentor:
+        return 0.0
+    if REMOTE in (startup, mentor):
+        return GEOGRAPHY_REMOTE_SCORE
+    return 1.0 if startup == mentor else 0.0
+
+
 # --- effectiveness ------------------------------------------------------------
 
 def bayesian_rating(rating_sum: float, rating_count: int) -> float:
@@ -475,7 +520,6 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
     rating_stats = attended_rating_stats([str(c.get("_id", "")) for c in candidates])
 
     profile_stage = (profile.stage or "").strip().lower()
-    profile_geography = (profile.geography or "").strip().lower()
 
     ranked: List[MentorMatch] = []
     for candidate, skill_matrix in zip(candidates, skill_matrices):
@@ -483,7 +527,6 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
         similarity = calibrate_similarity(raw_score)
         need_fit, reasons = compute_need_fit(needs, need_vectors, mentor_skills(candidate), skill_matrix)
 
-        candidate_geography = (candidate.get("geography") or "").strip().lower()
 
         stage_match = (
             1.0
@@ -491,9 +534,7 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
             else 0.0
         )
         domain_match = 1.0 if _domain_matches(profile, candidate) else 0.0
-        geography_match = (
-            1.0 if profile_geography and candidate_geography and candidate_geography == profile_geography else 0.0
-        )
+        geography_match = geography_score(profile.geography, candidate.get("geography"))
         effectiveness_score_normalized = normalised_effectiveness(
             *rating_stats.get(str(candidate.get("_id", "")), (0.0, 0))
         )

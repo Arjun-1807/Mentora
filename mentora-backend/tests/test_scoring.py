@@ -467,6 +467,63 @@ def test_unlimited_capacity_and_capacity_db_errors_never_drop_mentors(fake_vecto
     assert mm.recent_loads(["m0"]) == {}
 
 
+# --- geography --------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("Bengaluru", "bangalore"),
+        ("Bangalore, India", "bangalore"),
+        ("  BANGALORE ", "bangalore"),
+        ("New Delhi", "delhi"),
+        ("Gurugram, Haryana", "delhi"),
+        ("Bombay", "mumbai"),
+        ("San Francisco, CA", "san francisco"),
+        ("NYC", "new york"),
+        ("Remote", "remote"),
+        ("Remote (India)", "remote"),
+        ("Fully remote team", "remote"),
+        ("Other", ""),
+        ("null", ""),
+        (None, ""),
+        ("", ""),
+    ],
+)
+def test_normalise_geography_aliases(value, expected):
+    assert mm.normalise_geography(value) == expected
+
+
+@pytest.mark.parametrize(
+    "startup, mentor, expected",
+    [
+        ("Bengaluru", "Bangalore, India", 1.0),
+        ("Bangalore", "Bangalore", 1.0),
+        ("Mumbai", "Bangalore", 0.0),
+        ("Remote", "Bangalore", 0.5),
+        ("Bangalore", "Remote", 0.5),
+        ("Remote", "Remote", 0.5),
+        (None, "Remote", 0.0),
+        ("Other", "Other", 0.0),
+    ],
+)
+def test_geography_score(startup, mentor, expected):
+    assert mm.geography_score(startup, mentor) == expected
+
+
+def test_geography_alias_and_remote_reach_the_match_score(fake_vector_search):
+    profile = PROFILE_NO_NEEDS.model_copy(update={"geography": "Bengaluru"})
+    fake_vector_search([_zero(_id="same", geography="Bangalore, India"), _zero(_id="remote", geography="Remote")])
+    scores = {m.mentor_id: m.match_score for m in find_matching_mentors(profile)}
+    assert scores["same"] == pytest.approx(mm.GEOGRAPHY_MATCH_WEIGHT + E0, abs=1e-4)
+    assert scores["remote"] == pytest.approx(0.5 * mm.GEOGRAPHY_MATCH_WEIGHT + E0, abs=1e-4)
+
+
+def test_extraction_prompt_asks_for_geography():
+    from app.services import llm
+
+    assert '"geography"' in llm.SYSTEM_PROMPT and '"geography"' in llm.STRICT_SYSTEM_PROMPT
+
+
 # --- Bayesian effectiveness -----------------------------------------------------
 
 def test_bayesian_effectiveness_cold_start_is_neutral():
