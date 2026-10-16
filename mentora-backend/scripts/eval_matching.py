@@ -14,6 +14,7 @@ copy of the mentors collection):
     venv/bin/python scripts/eval_matching.py --save-baseline # overwrite the baseline
     venv/bin/python scripts/eval_matching.py --record final  # store a named run next to it
     venv/bin/python scripts/eval_matching.py -v              # per-profile rankings
+    venv/bin/python scripts/eval_matching.py --set COS_FLOOR=0.5  # try a constant
 
 Only reads from the database. It refuses to run against the shared
 `mentora` database unless --allow-prod-db is given.
@@ -186,7 +187,18 @@ def main() -> int:
     parser.add_argument("--record", metavar="NAME", help="store this run under runs[NAME] next to the baseline")
     parser.add_argument("--allow-prod-db", action="store_true", help="allow running against the `mentora` DB")
     parser.add_argument("-v", "--verbose", action="store_true", help="print per-profile results")
+    parser.add_argument(
+        "--set", action="append", default=[], metavar="NAME=VALUE",
+        help="override a numeric constant of app/services/mentor_matching.py for this run (repeatable)",
+    )
     args = parser.parse_args()
+
+    for assignment in args.set:
+        name, _, value = assignment.partition("=")
+        if not hasattr(mentor_matching, name):
+            parser.error(f"mentor_matching has no constant {name!r}")
+        setattr(mentor_matching, name, float(value))
+        print(f"override: {name} = {value}")
 
     if settings.MONGODB_DB_NAME in PROTECTED_DB_NAMES and not args.allow_prod_db:
         print(

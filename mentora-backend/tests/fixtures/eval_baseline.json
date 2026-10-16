@@ -301,5 +301,308 @@
       }
     ]
   },
-  "runs": {}
+  "runs": {
+    "step2_calibration": {
+      "generated_at": "2026-10-16T18:38:16+00:00",
+      "db": "mentora_staging",
+      "profiles": 32,
+      "metrics": {
+        "p_at_5": 0.6375,
+        "ndcg_at_5": 0.7876,
+        "mrr": 0.8385,
+        "spread_mean": 0.2631,
+        "spread_std": 0.1323
+      },
+      "per_profile": [
+        {
+          "id": "greenhaul",
+          "p_at_5": 0.8,
+          "ndcg_at_5": 0.6652,
+          "mrr": 0.2,
+          "spread": 0.156,
+          "top1": "Mentor 2",
+          "top1_domain": "Clean Energy"
+        },
+        {
+          "id": "skillbridge",
+          "p_at_5": 0.4,
+          "ndcg_at_5": 0.7715,
+          "mrr": 1.0,
+          "spread": 0.3642,
+          "top1": "Elena Petrova",
+          "top1_domain": "EdTech"
+        },
+        {
+          "id": "paylane",
+          "p_at_5": 0.6,
+          "ndcg_at_5": 0.4284,
+          "mrr": 0.2,
+          "spread": 0.0739,
+          "top1": "Tom Sullivan",
+          "top1_domain": "EdTech"
+        },
+        {
+          "id": "lendwise",
+          "p_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "mrr": 1.0,
+          "spread": 0.3045,
+          "top1": "Marcus Reid",
+          "top1_domain": "Fintech"
+        },
+        {
+          "id": "coinnest",
+          "p_at_5": 0.6,
+          "ndcg_at_5": 0.8808,
+          "mrr": 1.0,
+          "spread": 0.3911,
+          "top1": "Ava Chen",
+          "top1_domain": "Fintech"
+        },
+        {
+          "id": "carepulse",
+          "p_at_5": 0.4,
+          "ndcg_at_5": 0.9328,
+          "mrr": 1.0,
+          "spread": 0.5156,
+          "top1": "Priya Nair",
+          "top1_domain": "HealthTech"
+        },
+        {
+          "id": "mindmend",
+          "p_at_5": 1.0,
+          "ndcg_at_5": 0.7979,
+          "mrr": 0.3333,
+          "spread": 0.0482,
+          "top1": "Elena Petrova",
+          "top1_domain": "EdTech"
+        },
+        {
+          "id": "medistock",
+          "p_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "mrr": 1.0,
+          "spread": 0.3452,
+          "top1": "David Okafor",
+          "top1_domain": "HealthTech"
+        },
+        {
+          "id": "tutorloop",
+          "p_at_5": 0.4,
+          "ndcg_at_5": 0.7425,
+          "mrr": 1.0,
+          "spread": 0.3845,
+          "top1": "Tom Sullivan",
+          "top1_domain": "EdTech"
+        },
+        {
+          "id": "upskillhub",
+          "p_at_5": 1.0,
+          "ndcg_at_5": 0.7522,
+          "mrr": 0.2,
+          "spread": 0.0766,
+          "top1": "Mentor 1",
+          "top1_domain": "EdTech"
+        },
+        {
+          "id": "stackpilot",
+          "p_at_5": 0.4,
+          "ndcg_at_5": 0.7144,
+          "mrr": 1.0,
+          "spread": 0.4059,
+          "top1": "Sofia Marquez",
+          "top1_domain": "SaaS"
+        },
+        {
+          "id": "ledgerly",
+          "p_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "mrr": 1.0,
+          "spread": 0.3555,
+          "top1": "James Whitfield",
+          "top1_domain": "SaaS"
+        },
+        {
+          "id": "formcraft",
+          "p_at_5": 0.6,
+          "ndcg_at_5": 0.8501,
+          "mrr": 1.0,
+          "spread": 0.3695,
+          "top1": "Hannah Fischer",
+          "top1_domain": "SaaS"
+        },
+        {
+          "id": "threadly",
+          "p_at_5": 0.2,
+          "ndcg_at_5": 0.8262,
+          "mrr": 1.0,
+          "spread": 0.1332,
+          "top1": "Grace Kim",
+          "top1_domain": "E-commerce"
+        },
+        {
+          "id": "kartfast",
+          "p_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "mrr": 1.0,
+          "spread": 0.3293,
+          "top1": "Ben Alaoui",
+          "top1_domain": "E-commerce"
+        },
+        {
+          "id": "visionqa",
+          "p_at_5": 0.6,
+          "ndcg_at_5": 0.8228,
+          "mrr": 1.0,
+          "spread": 0.4123,
+          "top1": "Liam O'Connor",
+          "top1_domain": "AI/ML"
+        },
+        {
+          "id": "lexibot",
+          "p_at_5": 0.4,
+          "ndcg_at_5": 0.7521,
+          "mrr": 1.0,
+          "spread": 0.3629,
+          "top1": "Nadia Hassan",
+          "top1_domain": "AI/ML"
+        },
+        {
+          "id": "solarshare",
+          "p_at_5": 0.6,
+          "ndcg_at_5": 0.9056,
+          "mrr": 1.0,
+          "spread": 0.4074,
+          "top1": "Chloe Dubois",
+          "top1_domain": "Climate Tech"
+        },
+        {
+          "id": "carbonledger",
+          "p_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "mrr": 1.0,
+          "spread": 0.3533,
+          "top1": "Ravi Deshmukh",
+          "top1_domain": "Climate Tech"
+        },
+        {
+          "id": "evgrid",
+          "p_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "mrr": 1.0,
+          "spread": 0.2092,
+          "top1": "Ravi Deshmukh",
+          "top1_domain": "Climate Tech"
+        },
+        {
+          "id": "fieldsense",
+          "p_at_5": 0.4,
+          "ndcg_at_5": 0.5585,
+          "mrr": 1.0,
+          "spread": 0.1161,
+          "top1": "Liam O'Connor",
+          "top1_domain": "AI/ML"
+        },
+        {
+          "id": "cropcredit",
+          "p_at_5": 0.4,
+          "ndcg_at_5": 0.796,
+          "mrr": 1.0,
+          "spread": 0.1262,
+          "top1": "Mentor 2",
+          "top1_domain": "Clean Energy"
+        },
+        {
+          "id": "routemate",
+          "p_at_5": 0.2,
+          "ndcg_at_5": 0.151,
+          "mrr": 0.2,
+          "spread": 0.329,
+          "top1": "Tom Sullivan",
+          "top1_domain": "EdTech"
+        },
+        {
+          "id": "botworks",
+          "p_at_5": 0.8,
+          "ndcg_at_5": 0.852,
+          "mrr": 1.0,
+          "spread": 0.3019,
+          "top1": "Liam O'Connor",
+          "top1_domain": "AI/ML"
+        },
+        {
+          "id": "pixelquest",
+          "p_at_5": 0.6,
+          "ndcg_at_5": 0.6992,
+          "mrr": 1.0,
+          "spread": 0.0446,
+          "top1": "Elena Petrova",
+          "top1_domain": "EdTech"
+        },
+        {
+          "id": "insurenow",
+          "p_at_5": 0.4,
+          "ndcg_at_5": 0.4337,
+          "mrr": 0.2,
+          "spread": 0.1819,
+          "top1": "Priya Nair",
+          "top1_domain": "HealthTech"
+        },
+        {
+          "id": "clinicflow",
+          "p_at_5": 1.0,
+          "ndcg_at_5": 0.9578,
+          "mrr": 1.0,
+          "spread": 0.3041,
+          "top1": "David Okafor",
+          "top1_domain": "HealthTech"
+        },
+        {
+          "id": "kidscode",
+          "p_at_5": 0.4,
+          "ndcg_at_5": 0.8199,
+          "mrr": 1.0,
+          "spread": 0.3206,
+          "top1": "Elena Petrova",
+          "top1_domain": "EdTech"
+        },
+        {
+          "id": "supplysync",
+          "p_at_5": 0.4,
+          "ndcg_at_5": 0.6844,
+          "mrr": 1.0,
+          "spread": 0.3201,
+          "top1": "Sofia Marquez",
+          "top1_domain": "SaaS"
+        },
+        {
+          "id": "wealthbuddy",
+          "p_at_5": 0.6,
+          "ndcg_at_5": 0.9832,
+          "mrr": 1.0,
+          "spread": 0.2576,
+          "top1": "Marcus Reid",
+          "top1_domain": "Fintech"
+        },
+        {
+          "id": "nurseconnect",
+          "p_at_5": 0.4,
+          "ndcg_at_5": 0.5846,
+          "mrr": 0.5,
+          "spread": 0.0751,
+          "top1": "David Okafor",
+          "top1_domain": "HealthTech"
+        },
+        {
+          "id": "shopsense",
+          "p_at_5": 0.8,
+          "ndcg_at_5": 0.8409,
+          "mrr": 1.0,
+          "spread": 0.0421,
+          "top1": "Ben Alaoui",
+          "top1_domain": "E-commerce"
+        }
+      ]
+    }
+  }
 }

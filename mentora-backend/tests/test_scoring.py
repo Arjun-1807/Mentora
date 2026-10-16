@@ -104,7 +104,8 @@ def test_cosine_score_is_clamped(fake_vector_search):
 
 def test_results_are_sorted_and_capped_at_top_k(fake_vector_search):
     candidates = [
-        _candidate(_id=f"m{i}", score=i / 10.0, effectiveness_score=None, geography="Berlin")
+        # Raw Atlas scores inside the calibrated band (cos 0.54 .. 0.72).
+        _candidate(_id=f"m{i}", score=0.77 + i / 100.0, effectiveness_score=None, geography="Berlin")
         for i in range(10)
     ]
     fake_vector_search(candidates)
@@ -180,3 +181,34 @@ def test_domain_synonyms_count_as_domain_match(fake_vector_search, startup_domai
     )
     profile = PROFILE.model_copy(update={"domain": startup_domain})
     assert find_matching_mentors(profile)[0].match_score == pytest.approx(expected)
+
+
+# --- similarity calibration ---------------------------------------------------
+
+@pytest.mark.parametrize(
+    "raw_score, expected",
+    [
+        (1.0, 1.0),                                        # cos 1.0 -> above the ceiling
+        ((1 + mentor_matching.COS_CEIL) / 2, 1.0),         # cos == ceiling
+        ((1 + mentor_matching.COS_FLOOR) / 2, 0.0),        # cos == floor
+        (0.5, 0.0),                                        # cos 0 -> below the floor
+        (0.0, 0.0),
+    ],
+)
+def test_calibrate_similarity_endpoints(raw_score, expected):
+    assert mentor_matching.calibrate_similarity(raw_score) == pytest.approx(expected)
+
+
+def test_calibrate_similarity_undoes_atlas_mapping_and_is_linear_in_band():
+    floor, ceil = mentor_matching.COS_FLOOR, mentor_matching.COS_CEIL
+    mid_cos = (floor + ceil) / 2
+    assert mentor_matching.calibrate_similarity((1 + mid_cos) / 2) == pytest.approx(0.5)
+    # A raw 0.80 vs 0.85 gap (typical Atlas scores) becomes a large spread.
+    low, high = mentor_matching.calibrate_similarity(0.80), mentor_matching.calibrate_similarity(0.85)
+    assert high - low == pytest.approx(0.1 / (ceil - floor))
+
+
+def test_similarity_field_stays_the_raw_vector_search_score(fake_vector_search):
+    fake_vector_search([_candidate(score=0.8)])
+    [match] = find_matching_mentors(PROFILE)
+    assert match.similarity == pytest.approx(0.8)

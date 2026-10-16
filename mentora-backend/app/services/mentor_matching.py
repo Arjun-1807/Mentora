@@ -44,6 +44,27 @@ GEOGRAPHY_MATCH_WEIGHT = 0.05
 EFFECTIVENESS_WEIGHT = 0.10
 # ---------------------------------------------------------------------------
 
+# --- Similarity calibration -------------------------------------------------
+# Atlas returns vectorSearchScore = (1 + cos) / 2 for cosine indexes, so the
+# raw score of every candidate sits in a narrow ~0.75-0.90 band. We undo
+# that mapping (cos = 2s - 1) and stretch the band that BGE cosines actually
+# occupy onto [0, 1]. Both constants were fitted on the eval set
+# (tests/fixtures/eval_set.json, 32 profiles x 17 staging mentors):
+# COS_FLOOR ~ 5th percentile of all candidate cosines, COS_CEIL ~ the best
+# cosine seen. Re-fit them (scripts/eval_matching.py) if the embedding model
+# or the profile text templates change.
+COS_FLOOR = 0.54
+COS_CEIL = 0.82
+# ---------------------------------------------------------------------------
+
+
+def calibrate_similarity(vector_search_score: float) -> float:
+    """Map an Atlas cosine vectorSearchScore onto a 0-1 similarity that
+    actually spreads candidates apart (see COS_FLOOR / COS_CEIL)."""
+    cosine = 2.0 * float(vector_search_score) - 1.0
+    return max(0.0, min(1.0, (cosine - COS_FLOOR) / (COS_CEIL - COS_FLOOR)))
+
+
 # How many raw candidates to pull from vector search before re-ranking.
 VECTOR_SEARCH_CANDIDATE_LIMIT = 20
 TOP_K_RESULTS = 5
@@ -177,7 +198,8 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
 
     ranked: List[MentorMatch] = []
     for candidate in candidates:
-        cosine_score = max(0.0, min(1.0, float(candidate.get("score", 0.0))))
+        raw_score = max(0.0, min(1.0, float(candidate.get("score", 0.0))))
+        cosine_score = calibrate_similarity(raw_score)
 
         candidate_domain = canonical_domain(candidate.get("domain"))
         candidate_geography = (candidate.get("geography") or "").strip().lower()
@@ -213,7 +235,7 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
                 match_score=round(final_score, 4),
                 email=candidate.get("email"),
                 geography=candidate.get("geography"),
-                similarity=round(cosine_score, 4),
+                similarity=round(raw_score, 4),
             )
         )
 
