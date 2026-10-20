@@ -13,7 +13,7 @@ def _mentors(fake_mongo):
     return fake_mongo[settings.MONGODB_DB_NAME][settings.MONGODB_MENTORS_COLLECTION]
 
 
-def _seed_match(fake_mongo, *, match_id, user_id, mentor_id, status="pending"):
+def _seed_match(fake_mongo, *, match_id, user_id, mentor_id, status="meeting_scheduled"):
     _matches(fake_mongo).insert_one(
         {
             "match_id": match_id,
@@ -61,8 +61,10 @@ def test_mentor_sees_matches_pointing_at_their_mentor_record(client, fake_mongo)
     token = register(client, MENTOR_PAYLOAD)
     me = client.get("/me", headers=auth_header(token)).json()
 
-    _seed_match(fake_mongo, match_id="incoming", user_id="other-user", mentor_id=me["mentor_id"])
+    _seed_match(fake_mongo, match_id="incoming", user_id="other-user", mentor_id=me["mentor_id"], status="requested")
     _seed_match(fake_mongo, match_id="unrelated", user_id="other-user", mentor_id="another-mentor")
+    # A bare suggestion is the startup's private shortlist: never shown to the mentor.
+    _seed_match(fake_mongo, match_id="suggestion", user_id="other-user", mentor_id=me["mentor_id"], status="pending")
 
     response = client.post("/matches/all", headers=auth_header(token))
     assert [doc["match_id"] for doc in response.json()["matches"]] == ["incoming"]
@@ -122,7 +124,7 @@ def test_feedback_success_updates_score_and_completes_match(client, fake_mongo):
     token = register(client, STARTUP_PAYLOAD)
     me = client.get("/me", headers=auth_header(token)).json()
     mentor_id = _seed_mentor(fake_mongo)
-    _seed_match(fake_mongo, match_id="m", user_id=me["user_id"], mentor_id=mentor_id, status="emailed")
+    _seed_match(fake_mongo, match_id="m", user_id=me["user_id"], mentor_id=mentor_id, status="met")
 
     response = client.post(
         "/feedback",

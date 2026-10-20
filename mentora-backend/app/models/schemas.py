@@ -15,20 +15,19 @@ MentorStage = Literal["idea", "MVP", "growth", "all"]
 # "coordinator" = incubator staff: no profile, sees the cohort health view.
 UserRole = Literal["startup", "mentor", "coordinator"]
 
-# Match lifecycle vocabulary (see README "Match status lifecycle"):
-#   pending    -> created by POST /match, no outreach yet
-#   emailed    -> an intro email was drafted for it via POST /email
-#   email_sent -> the intro email was actually delivered (POST /feedback-status)
-#   accepted   -> the mentor accepted the request (PATCH /mentor/matches/{id})
-#   meeting_scheduled -> a Google Calendar meeting was booked (POST /calendar/book)
-#   completed  -> feedback was submitted for it via POST /feedback
-#   declined   -> terminal side-branch, set by the mentor
+# Match lifecycle vocabulary (see app/services/matches.py TRANSITIONS and the
+# README "Match lifecycle" table):
+#   suggested -> requested -> accepted | declined | withdrawn | expired
+#   accepted -> meeting_scheduled -> met -> completed;  suggested -> superseded
+# Legacy spellings still accepted on input: pending/emailed (= suggested),
+# email_sent (= requested).
 MatchStatus = Literal[
-    "pending", "emailed", "email_sent", "accepted", "meeting_scheduled", "completed", "declined"
+    "suggested", "requested", "accepted", "declined", "withdrawn", "expired",
+    "meeting_scheduled", "met", "completed", "superseded",
 ]
 
-# Statuses a client may set directly via POST /feedback-status.
-# "completed" is deliberately excluded: it is only reachable via /feedback.
+# Accepted by the deprecated POST /feedback-status (a no-op since requests are
+# sent server-side by POST /matches/{id}/request).
 ClientSettableMatchStatus = Literal["emailed", "email_sent"]
 
 # Mentor onboarding vocabularies (PATCH /mentor/profile).
@@ -51,6 +50,10 @@ MentorAvailability = Literal["Weekdays", "Weekends", "Flexible"]
 
 MAX_BIO_LENGTH = 300
 MAX_PAST_EXITS_LENGTH = 300
+# Phase 4 (matching quality): mentor skills / startup sectors limits.
+MAX_MENTOR_SKILLS = 15
+MAX_MENTOR_SKILL_LENGTH = 80
+MAX_STARTUP_SECTORS = 2
 
 # Minimum password length enforced at registration.
 MIN_PASSWORD_LENGTH = 8
@@ -66,6 +69,16 @@ class StartupProfile(BaseModel):
     challenges: List[str] = Field(default_factory=list, description="Key challenges the startup is facing")
     team_gaps: List[str] = Field(default_factory=list, description="Skill/role gaps in the founding team")
     geography: Optional[str] = Field(default=None, description="Startup's geography, e.g. 'San Francisco, CA'")
+    # Phase 4 (matching quality): up to MAX_STARTUP_SECTORS MentorSector
+    # labels; `domain` stays the first one for backward compatibility.
+    sectors: List[str] = Field(
+        default_factory=list, description="Up to 2 sectors from the MentorSector vocabulary, best first"
+    )
+
+    @field_validator("sectors", mode="before")
+    @classmethod
+    def _cap_sectors(cls, value: Any) -> List[str]:
+        return _coerce_str_list(value)[:MAX_STARTUP_SECTORS]
 
 
 MAX_IMPROVEMENT_TIPS = 3
@@ -136,6 +149,9 @@ class ExtractResponse(StartupProfile):
     LLM call failed)."""
 
     deck_feedback: DeckFeedback = Field(default_factory=DeckFeedback.default)
+    profile_id: Optional[str] = Field(default=None, description="The saved startup_profiles version")
+    version: Optional[int] = None
+    startup_id: Optional[str] = None
 
 
 class MentorMatch(BaseModel):
@@ -156,6 +172,15 @@ class MentorMatch(BaseModel):
     geography: Optional[str] = None
     similarity: Optional[float] = Field(
         default=None, description="Raw vector-search cosine similarity, clamped to [0, 1]"
+    )
+    # Phase 4 (matching quality): explanation of the match.
+    reasons: List[str] = Field(
+        default_factory=list,
+        description="Best 'startup need → mentor skill' pairs behind the match, best first (may be empty)",
+    )
+    status: Optional[str] = Field(default=None, description="Lifecycle status of the recorded match")
+    replacement_for: Optional[str] = Field(
+        default=None, description="match_id of the declined/expired/withdrawn match this suggestion replaces"
     )
 
 
@@ -291,6 +316,9 @@ class MentorProfileUpdate(BaseModel):
     preferred_stages: List[MentorStage] = Field(..., min_length=1)
     max_startups_per_month: MaxStartupsPerMonth
     availability: MentorAvailability
+    # Phase 4 (matching quality): functional skills matched against startup
+    # challenges / team gaps. Optional so older clients keep working.
+    skills: List[str] = Field(default_factory=list, max_length=MAX_MENTOR_SKILLS)
 
     @field_validator("name")
     @classmethod
@@ -299,6 +327,15 @@ class MentorProfileUpdate(BaseModel):
         if not value:
             raise ValueError("name must not be blank")
         return value
+
+    @field_validator("skills", mode="before")
+    @classmethod
+    def _clean_skills(cls, value: Any) -> List[str]:
+        cleaned = _clean_str_list(value)
+        for skill in cleaned:
+            if len(skill) > MAX_MENTOR_SKILL_LENGTH:
+                raise ValueError(f"each skill must be at most {MAX_MENTOR_SKILL_LENGTH} characters")
+        return cleaned
 
     @field_validator("linkedin_url", "bio", "past_exits")
     @classmethod
@@ -337,12 +374,11 @@ class MentorProfileUpdateResponse(BaseModel):
 class EmailRequest(BaseModel):
     """Request body for POST /email."""
 
-    startup_profile: StartupProfile
-    mentor: MentorMatch
-    match_id: Optional[str] = Field(
-        default=None,
-        description="Optional id of the match record to advance to status 'emailed'.",
+    startup_profile: Optional[StartupProfile] = Field(
+        default=None, description="Defaults to the caller's active startup profile"
     )
+    mentor: MentorMatch
+    match_id: Optional[str] = Field(default=None, description="Optional id of the match being drafted for")
 
 
 class EmailResponse(BaseModel):
@@ -602,6 +638,7 @@ class HealthResponse(BaseModel):
 class CohortStartup(BaseModel):
     user_id: str
     email: Optional[str] = None
+    company_name: Optional[str] = None
     domain: Optional[str] = None
     stage: Optional[str] = None
     health_score: Optional[float] = None
@@ -723,3 +760,83 @@ class MyOrgResponse(BaseModel):
 
     org: OrgOut
     cohorts: List[CohortOut]
+
+
+# --- Startup records and versioned profiles (Phase 2) ---------------------------
+
+class StartupProfileVersionOut(BaseModel):
+    profile_id: str
+    version: int
+    source: Optional[str] = None
+    profile: Dict[str, Any] = Field(default_factory=dict)
+    deck_feedback: Optional[DeckFeedback] = None
+    deck_filename: Optional[str] = None
+    created_at: Optional[str] = None
+    active: bool = False
+
+
+class StartupMeResponse(BaseModel):
+    """GET /startup/me: the caller's startup, its active profile and company name."""
+
+    startup_id: str
+    company_name: Optional[str] = None
+    org_id: Optional[str] = None
+    cohort_id: Optional[str] = None
+    active_profile: Optional[StartupProfileVersionOut] = None
+    profile_count: int = 0
+
+
+class StartupProfilesResponse(BaseModel):
+    profiles: List[StartupProfileVersionOut]
+
+
+class StartupUpdateRequest(BaseModel):
+    """PATCH /startup/me."""
+
+    company_name: str = Field(..., min_length=1, max_length=120)
+
+    @field_validator("company_name")
+    @classmethod
+    def _strip(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("company_name must not be blank")
+        return value
+
+
+class StartupProfilePatch(BaseModel):
+    """PATCH /startup/profiles/active: corrected extracted fields (any subset)."""
+
+    domain: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    stage: Optional[StartupStage] = None
+    challenges: Optional[List[str]] = Field(default=None, max_length=20)
+    team_gaps: Optional[List[str]] = Field(default=None, max_length=20)
+    geography: Optional[str] = Field(default=None, max_length=120)
+
+    @field_validator("challenges", "team_gaps", mode="before")
+    @classmethod
+    def _lists(cls, value: Any) -> Optional[List[str]]:
+        if value is None:
+            return None
+        return [item[:300] for item in _clean_str_list(value)]
+
+    @model_validator(mode="after")
+    def _not_empty(self) -> "StartupProfilePatch":
+        if not self.model_fields_set:
+            raise ValueError("provide at least one field to update")
+        return self
+
+
+class MatchRequestIn(BaseModel):
+    """POST /matches/{match_id}/request: the (edited) intro email."""
+
+    subject: str = Field(..., min_length=1, max_length=200)
+    body: str = Field(..., min_length=1, max_length=10_000)
+
+    @field_validator("subject", "body")
+    @classmethod
+    def _strip(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value

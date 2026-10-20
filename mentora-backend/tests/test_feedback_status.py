@@ -50,24 +50,18 @@ def test_feedback_status_requires_authentication(client):
     assert client.post("/feedback-status", json={"match_id": "m1", "status": "email_sent"}).status_code == 401
 
 
-def test_feedback_status_marks_email_sent(client, fake_mongo):
+def test_feedback_status_no_longer_changes_the_status(client, fake_mongo):
+    """Deprecated: intros are sent by POST /matches/{id}/request, so a client
+    can no longer mark its own match as sent."""
     token = _owned_match(client, fake_mongo, status="emailed")
     response = client.post(
         "/feedback-status", json={"match_id": "m1", "status": "email_sent"}, headers=auth_header(token)
     )
     assert response.status_code == 200
-    assert response.json() == {"success": True, "match_id": "m1", "status": "email_sent"}
+    assert response.json() == {"success": True, "match_id": "m1", "status": "suggested"}
     doc = _matches(fake_mongo).find_one({"match_id": "m1"})
-    assert doc["status"] == "email_sent"
-    assert doc["email_sent_at"]
-
-
-def test_feedback_status_can_skip_from_pending_to_email_sent(client, fake_mongo):
-    token = _owned_match(client, fake_mongo, status="pending")
-    response = client.post(
-        "/feedback-status", json={"match_id": "m1", "status": "email_sent"}, headers=auth_header(token)
-    )
-    assert response.json()["status"] == "email_sent"
+    assert doc["status"] == "emailed"
+    assert "email_sent_at" not in doc
 
 
 def test_feedback_status_never_regresses(client, fake_mongo):
@@ -80,14 +74,14 @@ def test_feedback_status_never_regresses(client, fake_mongo):
     assert _matches(fake_mongo).find_one({"match_id": "m1"})["status"] == "completed"
 
 
-def test_feedback_status_is_idempotent(client, fake_mongo):
+def test_feedback_status_reports_the_normalised_status(client, fake_mongo):
     token = _owned_match(client, fake_mongo, status="email_sent")
     for _ in range(2):
         response = client.post(
             "/feedback-status", json={"match_id": "m1", "status": "email_sent"}, headers=auth_header(token)
         )
         assert response.status_code == 200
-        assert response.json()["status"] == "email_sent"
+        assert response.json()["status"] == "requested"
 
 
 @pytest.mark.parametrize("status", ["completed", "pending", "sent", ""])

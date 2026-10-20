@@ -1,4 +1,6 @@
 """Tests for GET /dashboard/stats and GET /mentor/stats."""
+from datetime import datetime, timezone
+
 from tests.conftest import (
     MENTOR_PAYLOAD,
     STARTUP_PAYLOAD,
@@ -48,8 +50,11 @@ def test_mentor_stats(client, fake_mongo):
     mentor_token = register(client, MENTOR_PAYLOAD)
     mentor_id = me(client, mentor_token)["mentor_id"]
 
+    fresh = datetime.now(timezone.utc).isoformat()
+    # Suggestions (pending/emailed) are invisible to the mentor; email_sent
+    # is a (fresh, so not yet expired) request.
     for status in ("pending", "emailed", "email_sent"):
-        insert_match(fake_mongo, user_id=a, mentor_id=mentor_id, status=status)
+        insert_match(fake_mongo, user_id=a, mentor_id=mentor_id, status=status, requested_at=fresh)
     insert_match(fake_mongo, user_id=a, mentor_id=mentor_id, status="accepted")
     insert_match(fake_mongo, user_id=a, mentor_id=mentor_id, status="meeting_scheduled")
     insert_match(fake_mongo, user_id=a, mentor_id=mentor_id, status="completed")
@@ -62,11 +67,11 @@ def test_mentor_stats(client, fake_mongo):
 
     response = client.get("/mentor/stats", headers=auth_header(mentor_token))
     assert response.status_code == 200, response.text
-    assert response.json() == {"pending_requests": 3, "accepted": 4, "avg_rating": 3.5, "total_helped": 2}
+    assert response.json() == {"pending_requests": 1, "accepted": 4, "avg_rating": 3.5, "total_helped": 2}
 
-    # The mentor's own dashboard stats are scoped to incoming matches.
+    # The mentor's own dashboard stats are scoped to incoming, requested+ matches.
     dash = client.get("/dashboard/stats", headers=auth_header(mentor_token)).json()
-    assert dash["total_matches"] == 8
+    assert dash["total_matches"] == 6
     assert dash["avg_rating"] == 3.5
 
 

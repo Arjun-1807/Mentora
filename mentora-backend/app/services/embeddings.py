@@ -52,6 +52,24 @@ def embed_passage(text: str) -> List[float]:
     return vector.tolist()
 
 
+def embed_queries(texts: List[str]) -> List[List[float]]:
+    """Batch version of embed_query (one model call for all texts)."""
+    if not texts:
+        return []
+    model = get_embedding_model()
+    vectors = model.encode([BGE_QUERY_INSTRUCTION + text for text in texts], normalize_embeddings=True)
+    return [vector.tolist() for vector in vectors]
+
+
+def embed_passages(texts: List[str]) -> List[List[float]]:
+    """Batch version of embed_passage (one model call for all texts)."""
+    if not texts:
+        return []
+    model = get_embedding_model()
+    vectors = model.encode(list(texts), normalize_embeddings=True)
+    return [vector.tolist() for vector in vectors]
+
+
 def build_startup_profile_text(domain: str, stage: str, challenges: List[str], team_gaps: List[str]) -> str:
     """Build a descriptive text representation of a startup profile for embedding."""
     challenges_str = ", ".join(challenges) if challenges else "none specified"
@@ -68,6 +86,7 @@ def build_mentor_profile_text(
     stage_focus: str,
     expertise: List[str],
     *,
+    skills: Optional[List[str]] = None,
     bio: Optional[str] = None,
     past_exits: Optional[str] = None,
     years_experience: Optional[str] = None,
@@ -77,15 +96,17 @@ def build_mentor_profile_text(
     Kept structurally similar to build_startup_profile_text() so that the
     query and passage embeddings live in a comparable semantic space.
 
-    The keyword-only extras come from mentor onboarding; each is appended
-    only when provided, so the text for seeded mentors (which have none of
-    them) is byte-identical to before.
+    The keyword-only extras come from mentor onboarding (and `skills` from
+    the seed data too); each is appended only when provided, so a mentor
+    without them embeds exactly as before.
     """
     expertise_str = ", ".join(expertise) if expertise else "general mentorship"
     text = (
         f"Domain: {domain}. Stage focus: {stage_focus}. "
         f"Expertise: {expertise_str}."
     )
+    if skills:
+        text += f" Skills: {', '.join(skills)}."
     if years_experience:
         text += f" Experience: {years_experience} years."
     if past_exits:

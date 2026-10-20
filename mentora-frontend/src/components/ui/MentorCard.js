@@ -8,6 +8,7 @@ import ScoreRing from "@/components/ui/ScoreRing";
 import { cn } from "@/lib/utils";
 
 const MAX_EXPERTISE = 4;
+const MAX_REASONS = 3;
 const EASE_OUT = [0.22, 1, 0.36, 1];
 
 export function initialsOf(name) {
@@ -63,6 +64,8 @@ export default function MentorCard({
   const shown = expertise.slice(0, MAX_EXPERTISE);
   const overflow = expertise.length - shown.length;
   const stages = toList(mentor.stage_focus);
+  // "startup need → mentor skill" pairs from /match (absent on older data).
+  const reasons = variant === "match" ? toList(mentor.reasons).slice(0, MAX_REASONS) : [];
 
   return (
     <motion.article
@@ -120,6 +123,12 @@ export default function MentorCard({
                   </li>
                 )}
               </ul>
+            )}
+            {reasons.length > 0 && (
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                <span className="font-medium text-foreground">Why this match: </span>
+                {reasons.join(" · ")}
+              </p>
             )}
           </div>
         </div>

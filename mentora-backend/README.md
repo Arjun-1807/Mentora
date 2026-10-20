@@ -17,19 +17,26 @@ with feedback that feeds back into ranking.
   immediately matchable.
 - `POST /extract` — upload a pitch-deck PDF, get structured JSON
   (`domain`, `stage`, `challenges`, `team_gaps`, `geography`) via
-  PyMuPDF + Groq.
-- `POST /match` — submit a structured startup profile, get the top 5
-  matching mentors via MongoDB Atlas `$vectorSearch` plus a weighted
-  re-rank; match records are persisted per user.
-- `POST /matches/all` — the calling user's match history.
+  PyMuPDF + Groq; saved as a new version of the startup's profile.
+- `GET /startup/me`, `GET /startup/profiles`, `PATCH /startup/me`,
+  `PATCH /startup/profiles/active` — the startup's server-side record:
+  company name and versioned profiles (see "Startup journey" below).
+- `POST /match` — top 5 mentors for the startup's active profile via
+  MongoDB Atlas `$vectorSearch` plus a weighted re-rank; recorded as
+  `suggested` matches keyed on (startup, mentor).
+- `GET /matches` — the startup's matches (the source of truth for the UI).
+- `POST /matches/{id}/request` — send the intro email (backend SMTP) and
+  mark the match `requested`; `POST /matches/{id}/withdraw` takes it back.
+- `GET /mentor/matches`, `PATCH /mentor/matches/{id}` — the mentor's
+  inbox (requested and later only) and accept / decline.
+- `POST /matches/all` — legacy listing of the caller's matches.
 - `GET /mentors` — mentor directory (never returns embeddings).
-- `POST /email` — Groq drafts an intro email; advances the match to
-  `emailed`.
-- `POST /feedback` — attendance + 1-5 rating, recomputes the mentor's
-  rolling-average `effectiveness_score`, completes the match.
+- `POST /email` — Groq drafts an intro email (nothing is sent).
+- `POST /feedback` — attendance + 1-5 rating once a meeting was booked,
+  recomputes the mentor's rolling-average `effectiveness_score`,
+  completes the match.
 - `GET /feedback/summary` — per-mentor aggregate feedback stats.
-- `POST /feedback-status` — advance a match to `emailed` / `email_sent`
-  (the frontend calls it after actually delivering the intro email).
+- `POST /feedback-status` — deprecated no-op (reports the status).
 - `PATCH /mentor/profile` — mentor onboarding: saves the full mentor
   profile and re-embeds it for vector search.
 - `POST /evaluate` — retrieval metrics (precision@5, recall@5, MRR,
@@ -87,7 +94,33 @@ Optional overrides (all documented in `.env.example`): `GROQ_MODEL`,
 `MONGODB_*`, `EMBEDDING_*`, `FRONTEND_ORIGIN`, `JWT_ALGORITHM`,
 `JWT_EXPIRE_MINUTES` (default 1440 = 24h), `MAX_UPLOAD_BYTES` (default
 10 MB), `RATE_LIMIT_ENABLED`, `LOGIN_RATE_LIMIT`,
-`LOGIN_RATE_WINDOW_SECONDS`, `LLM_RATE_LIMIT`, `LLM_RATE_WINDOW_SECONDS`.
+`LOGIN_RATE_WINDOW_SECONDS`, `LLM_RATE_LIMIT`, `LLM_RATE_WINDOW_SECONDS`,
+`MATCH_REQUEST_RATE_LIMIT`, `MATCH_REQUEST_RATE_WINDOW_SECONDS`,
+`MATCH_REQUEST_TTL_DAYS` (default 7).
+
+### Email
+
+Intro requests and lifecycle notifications are sent **by the backend**
+through Gmail SMTP (`app/services/mailer.py`); the frontend has no email
+route or keys any more. The recipient is always looked up server-side
+(the mentor's address on file, or the startup owner's), never taken from
+the client.
+
+```
+GMAIL_USER=mentora.notifications@gmail.com
+GMAIL_APP_PASSWORD=<16-character Google App Password>
+EMAIL_DELIVERY=            # smtp | log; empty = smtp when both values above are set, else log
+```
+
+Gmail setup: turn on 2-Step Verification for the sending account, then
+create an App Password (myaccount.google.com → Security → App passwords).
+In `log` mode (the default without credentials, handy for staging) nothing
+is sent; every message is still written to the `outbox` collection
+(`{to, subject, body, reply_to, kind, match_id, delivery, status, created_at}`),
+which is also the audit trail in `smtp` mode. Explicitly setting
+`EMAIL_DELIVERY=smtp` without credentials makes sends fail (`502`) instead
+of silently logging. Gmail allows roughly 500 messages a day, which is why
+`POST /matches/{id}/request` is rate-limited per user.
 
 Google Calendar (optional — without the id/secret every `/calendar/*`
 endpoint except the slot endpoints and `/calendar/status` answers `503
@@ -143,18 +176,41 @@ or the Atlas Admin API.
 ```json
 {
   "fields": [
-    {
-      "type": "vector",
-      "path": "embedding",
-      "numDimensions": 768,
-      "similarity": "cosine"
-    }
+    { "type": "vector", "path": "embedding", "numDimensions": 768, "similarity": "cosine" },
+    { "type": "filter", "path": "listed" },
+    { "type": "filter", "path": "active" },
+    { "type": "filter", "path": "visibility.scope" },
+    { "type": "filter", "path": "visibility.org_ids" }
   ]
 }
 ```
 
+   The `filter` fields are required by the `$vectorSearch` pre-filter in
+   `app/services/mentor_matching.py` (`listed != false AND active != false`;
+   documents without the fields count as listed/active). Without them Atlas
+   rejects the query and `/match` answers `502`. `visibility.*` is declared
+   ahead of the tenancy work so the index only has to be rebuilt once.
+
 4. Create the index and wait for its status to become **Active** (usually
    under a minute for a small collection).
+
+### Updating an existing index (the Phase 4 filter fields)
+
+An index created from the older vector-only definition must be updated
+**before** deploying this code:
+
+```bash
+# take a backup first if in doubt; the index keeps serving the old
+# definition while the new one builds
+MONGODB_DB_NAME=mentora venv/bin/python scripts/update_vector_index.py --dry-run --allow-prod-db
+MONGODB_DB_NAME=mentora venv/bin/python scripts/update_vector_index.py --allow-prod-db
+```
+
+The script calls `update_search_index` (or `create_search_index` if the
+index is missing) with exactly the definition above and waits until Atlas
+reports it `READY`. It refuses to touch the `mentora` database without
+`--allow-prod-db`. In the Atlas UI the equivalent is **Search → 
+mentor_vector_index → Edit index definition** and pasting the JSON above.
 
 ### Option B: mongosh
 
@@ -165,15 +221,15 @@ db.mentors.createSearchIndex(
   "vectorSearch",
   {
     fields: [
-      {
-        type: "vector",
-        path: "embedding",
-        numDimensions: 768,
-        similarity: "cosine"
-      }
+      { type: "vector", path: "embedding", numDimensions: 768, similarity: "cosine" },
+      { type: "filter", path: "listed" },
+      { type: "filter", path: "active" },
+      { type: "filter", path: "visibility.scope" },
+      { type: "filter", path: "visibility.org_ids" }
     ]
   }
 )
+// existing index: db.mentors.updateSearchIndex("mentor_vector_index", { fields: [ ...same... ] })
 ```
 
 ### Option C: Atlas Administration API
@@ -221,11 +277,26 @@ python seed_mentors.py
 This removes previously seeded mentors (every mentor document **without**
 a `user_id`) and inserts 15 mentor profiles, each with a
 `BAAI/bge-base-en-v1.5` embedding computed from their
-domain/stage_focus/expertise (passage-side, no query prefix — see
-"Embedding convention" below), a fake contact `email`
+domain/stage_focus/expertise/skills (passage-side, no query prefix — see
+"Embedding convention" below), a list of functional `skills` with one
+embedding per skill (`skill_embeddings`), a fake contact `email`
 (`…@mentors.mentora.dev`), `preferred_stages` and `seeded: true`. Mentors
-created through `POST /register` are kept. Re-run it after upgrading so
-the seeded mentors pick up their `email` field.
+created through `POST /register` are kept.
+
+**It refuses to run against the shared `mentora` database** (deleting the
+seeded mentors there would orphan existing match records) unless
+`--yes-clear-mentora` is passed. To bring an existing database up to date
+in place — seed skills, skill embeddings and re-embedded profiles, without
+deleting anything — use the idempotent backfill instead:
+
+```bash
+MONGODB_DB_NAME=mentora venv/bin/python scripts/backfill_mentor_skills.py --dry-run --allow-prod-db
+MONGODB_DB_NAME=mentora venv/bin/python scripts/backfill_mentor_skills.py --allow-prod-db
+```
+
+Seeded mentors (matched by seed email, no `user_id`) get the skills from
+`seed_mentors.py`; registered mentors keep the skills they entered at
+onboarding; every mentor is re-embedded with `build_mentor_profile_text()`.
 
 ## 6. Run the server
 
@@ -363,11 +434,12 @@ Auth: required. Rate-limited per user. `multipart/form-data`, field name
 - Response `200`:
   ```json
   {
-    "domain": "Fintech",
+    "domain": "FinTech",
+    "sectors": ["FinTech", "SaaS"],
     "stage": "MVP",
     "challenges": ["Customer acquisition cost is high", "Limited runway"],
     "team_gaps": ["No dedicated CTO", "No sales lead"],
-    "geography": "San Francisco, CA",
+    "geography": "Bangalore",
     "deck_feedback": {
       "confidence_score": 72,
       "strong_signals": ["Domain clearly identified as Fintech"],
@@ -376,6 +448,14 @@ Auth: required. Rate-limited per user. `multipart/form-data`, field name
     }
   }
   ```
+- `sectors` (1–2, best first) is constrained to the mentor onboarding
+  vocabulary (Clean Energy, EdTech, FinTech, HealthTech, AgriTech, SaaS,
+  D2C, DeepTech, Logistics, Others) and snapped onto it after the call
+  (e.g. "Climate Tech" → "Clean Energy", "AI/ML" → "DeepTech"); `domain` is
+  always `sectors[0]` (kept for older clients). If the model returns
+  nothing that maps onto the vocabulary, `sectors` is `[]` and `domain`
+  keeps the model's free text. `geography` is the city the deck names,
+  `"Remote"`, or `null` (the prompt tells the model not to guess).
 - `deck_feedback` comes from a second Groq call (JSON mode) that rates how
   well a mentor could assess fit from the extracted profile.
   `confidence_score` is clamped to an integer 0-100 and `improvement_tips`
@@ -393,7 +473,13 @@ Auth: required. Rate-limited per user. `multipart/form-data`, field name
 
 ### `POST /match`
 
-Auth: required. Body shaped like the `/extract` response:
+Auth: required. For a startup the body is normally **empty**: the
+startup's active profile (latest `/extract` or manual correction) is used,
+and `409` is returned when there is none yet. For backward compatibility a
+full profile body (shaped like the `/extract` response) is still accepted;
+if it differs from the active profile it is saved as a new version first.
+Non-startup accounts must send a profile and get a preview (nothing is
+recorded). Legacy body:
 
 ```json
 {
@@ -401,9 +487,12 @@ Auth: required. Body shaped like the `/extract` response:
   "stage": "MVP",
   "challenges": ["Customer acquisition cost is high"],
   "team_gaps": ["No dedicated CTO"],
-  "geography": "New York, NY"
+  "geography": "New York, NY",
+  "sectors": ["FinTech"]
 }
 ```
+
+`sectors` is optional (older clients omit it; `domain` is then used alone).
 
 - Response `200`:
   ```json
@@ -419,19 +508,26 @@ Auth: required. Body shaped like the `/extract` response:
         "match_id": "0fbb6ece-12d5-4461-8fad-30bc79836ed7",
         "email": "ava.chen@mentors.mentora.dev",
         "geography": "San Francisco, CA",
-        "similarity": 0.8231
+        "similarity": 0.8231,
+        "reasons": ["Customer acquisition cost is high → Customer discovery and product-market fit"],
+        "status": "suggested",
+        "replacement_for": null
       }
     ]
   }
   ```
-- Each match is persisted in `matches`, stamped with the caller's
-  `user_id` from the JWT `sub`, and **upserted** on
-  `(user_id, mentor_id, profile_fingerprint)` — the fingerprint being a
-  stable SHA-256 of the normalised startup profile. Re-matching the same
-  profile therefore refreshes the existing records (keeping their
-  `match_id` and `status`) instead of duplicating history and
-  double-counting dashboard stats.
-- `match_id` is the handle to pass to `/email` and `/feedback`.
+- `reasons` (possibly empty) lists up to 3 "startup need → mentor skill"
+  pairs behind the match, best first (see "Scoring / matching details").
+  The frontend shows them as "Why this match" on each card.
+- Matches are keyed on the pair **(startup, mentor)**: one live document
+  per pair (`active: true`, partial unique index). A mentor already matched
+  keeps its document, `match_id` and status (e.g. `accepted`) and only gets
+  a refreshed score / `profile_id` / `startup_profile` snapshot, so a new
+  deck never strands an accepted match. Live `suggested` matches whose
+  mentor is no longer in the top 5 become `superseded`; mentors the startup
+  was declined / withdrawn / expired with are excluded from the ranking.
+- `match_id` is the handle for `/matches/{id}/request`, `/calendar/book`
+  and `/feedback`.
 - `similarity` is the raw clamped cosine score; `email` is the mentor's
   contact address (if known).
 - Errors: `404` `"No mentor profiles found. Please seed the database."`
@@ -439,19 +535,78 @@ Auth: required. Body shaped like the `/extract` response:
 - Errors: `401`, `422` invalid profile, `502` vector search unavailable
   (the client sees a generic message; details go to the server log).
 
+### `GET /matches`
+
+Auth: startup. The startup's matches, newest first — everything except
+`superseded` suggestions (declined / withdrawn / expired ones stay for
+history). Each item is the match document plus the mentor card fields
+(`name`, `domain`, `stage_focus`, `expertise`, `geography`, `email`,
+`match_score`) and, for replacements, `replacement_for_name`. Requests
+older than `MATCH_REQUEST_TTL_DAYS` are expired first (lazily — there is no
+scheduler). Errors: `401`, `403` not a startup, `502`.
+
+### `POST /matches/{match_id}/request`
+
+Auth: startup, own match, status `suggested`. Body:
+`{"subject": "...", "body": "..."}` (1-200 / 1-10000 chars, the reviewed
+draft from `/email`). Sends the intro to the mentor's address **looked up
+server-side** (never from the client), with the founder's email as
+Reply-To and a link to the mentor's requests tab
+(`FRONTEND_ORIGIN/mentor/dashboard?tab=requests`), then moves the match to
+`requested` (stamping `requested_at`, `email_sent_at` and `request`).
+Rate-limited per user (`MATCH_REQUEST_RATE_LIMIT`).
+
+- Response `200`: `{"success": true, "delivery": "smtp" | "log", "match": {...}}`
+- Errors: `403` not a startup / not your match, `404` unknown match,
+  `409` already requested (or no mentor email on file), `422`, `429`,
+  `502` delivery failed (the match stays `suggested`; retry is safe).
+
+### `POST /matches/{match_id}/withdraw`
+
+Auth: startup, own match, status `requested` → `withdrawn` (else `409`).
+A replacement suggestion is added. Response: `{"success": true, "match": {...}}`.
+
+### `GET /mentor/matches` / `PATCH /mentor/matches/{match_id}`
+
+Auth: mentor. The inbox only ever contains matches from `requested` on
+(`suggested` and `superseded` are the startup's private shortlist).
+`?status=requested,accepted` filters (legacy spellings accepted). Each item
+carries `company_name`, `startup_summary` (domain, stage, challenges,
+team gaps, geography), the intro `request` and — **only from `accepted`
+on** — `startup_email`.
+
+`PATCH` with `{"status": "accepted" | "declined"}` (uuid `match_id` or
+Mongo `_id`) goes through the state machine: only a `requested` match can
+be answered, repeating the same answer is a no-op `200`, anything else is
+`409` (a match never moves backwards); `404` for a suggestion, `403` for
+another mentor's match. The startup is emailed on accept / decline, and a
+decline adds a replacement suggestion.
+
 ### `POST /matches/all`
 
-Auth: required. No body. Returns only the caller's matches:
+Auth: required. Legacy listing: a `startup` sees its own matches
+(superseded excluded); a `mentor` sees matches pointing at their mentor
+record from `requested` on, shaped like `GET /mentor/matches`.
+Errors: `401`, `502`.
 
-- a `startup` user sees the matches they created (`user_id == sub`);
-- a `mentor` user sees matches pointing at their own mentor record
-  (`mentor_id == users.mentor_id`), so they see incoming interest without
-  seeing other startups' matches. A mentor account with no linked mentor
-  document falls back to its own outgoing matches.
+### Startup journey: `/startup/*`
 
-Nobody can read the whole collection. Response `200`:
-`{"matches": [ <match document>, ... ]}`, newest first, with `ObjectId`s
-and datetimes stringified. Errors: `401`, `502`.
+Auth: startup (`403` otherwise). The startup document is created on first
+use (and adopts the user's pre-existing matches).
+
+- `GET /startup/me` → `{startup_id, company_name, org_id, cohort_id,
+  active_profile: {profile_id, version, source, profile, deck_feedback,
+  deck_filename, created_at, active} | null, profile_count}`.
+- `GET /startup/profiles` → `{profiles: [...]}`, newest version first.
+- `PATCH /startup/me` `{company_name}` → as `GET /startup/me`.
+- `PATCH /startup/profiles/active` with any of `domain`, `stage`,
+  `challenges`, `team_gaps`, `geography` → saves a **new version**
+  (`source: "manual"`, keeping the deck feedback) and makes it active;
+  `409` before the first deck, `422` for an empty body or invalid values.
+
+Every `/extract` adds a version with `source: "deck"`, `deck_feedback` and
+`deck_filename`; its response also carries `profile_id`, `version` and
+`startup_id`.
 
 ### `GET /mentors`
 
@@ -491,9 +646,10 @@ Auth: required. Rate-limited per user. Body:
 }
 ```
 
-`match_id` is **optional** (it may also be supplied as `mentor.match_id`),
-so existing callers keep working. When present and owned by the caller,
-the match advances to status `emailed`.
+`startup_profile` is optional (the caller's active profile is used when it
+is missing); `match_id` is accepted for compatibility and ignored. This
+only drafts: nothing is sent and no status changes — the reviewed draft is
+sent with `POST /matches/{match_id}/request`.
 
 - Response `200`: `{"subject": "...", "body": "..."}`
 - Errors: `401`, `422`, `429`, `503` `"Email generation unavailable.
@@ -522,15 +678,17 @@ Checks performed, in order:
    owned.)
 4. The submitted `mentor_id` must equal the match record's `mentor_id` →
    else `400`.
-5. **One feedback per match**: a second submission for the same
+5. A meeting must have been booked: the match must be `meeting_scheduled`
+   or `met` → else `409`.
+6. **One feedback per match**: a second submission for the same
    `match_id` is rejected with `409` (enforced by a unique index, so it is
    race-free). Feedback therefore cannot be replayed to inflate or deflate
    a mentor's ranking.
 
 On success, the mentor's `effectiveness_score` is recomputed with a
 MongoDB `$group`/`$avg` aggregation (not by pulling every feedback
-document into Python), `feedback_count` is updated, and the match
-advances to `completed`.
+document into Python), `feedback_count` is updated, and the match moves
+to `completed` through the state machine.
 
 - Response `200`: `{"success": true, "new_effectiveness_score": 4.0}`
 - Errors: `400`, `401`, `403`, `404`, `409`, `422` (`rating` must be a
@@ -539,16 +697,13 @@ advances to `completed`.
 
 ### `POST /feedback-status`
 
-Auth: required. Body: `{"match_id": "...", "status": "email_sent"}`.
-`status` may only be `emailed` or `email_sent` (`completed` is reachable
-only through `POST /feedback`) — anything else is `422`.
+**Deprecated.** Auth: required. Body: `{"match_id": "...", "status": "email_sent"}`
+(`emailed` / `email_sent`, else `422`). It used to let the client mark its
+own match as sent; intros are now sent by `POST /matches/{id}/request`,
+the only way to reach `requested`, so this endpoint no longer writes and
+just reports the match's (normalised) status.
 
-Forward-only and idempotent: requesting a status the match already
-reached or passed returns `200` without changing it. Moving to
-`email_sent` also stamps `email_sent_at`.
-
-- Response `200`: `{"success": true, "match_id": "...", "status": "email_sent"}`
-  (`status` is what is stored after the call).
+- Response `200`: `{"success": true, "match_id": "...", "status": "suggested"}`
 - Errors: `401`, `403` not your match, `404` unknown match, `422`.
 
 ### `PATCH /mentor/profile`
@@ -566,7 +721,8 @@ Auth: required, `role` must be `mentor` (else `403`). Body:
   "past_exits": "Exited Series B SaaS startup in 2021",
   "preferred_stages": ["MVP", "growth"],
   "max_startups_per_month": "2",
-  "availability": "Weekends"
+  "availability": "Weekends",
+  "skills": ["Seed fundraising", "Enterprise B2B sales", "Hiring a first engineering team"]
 }
 ```
 
@@ -577,13 +733,18 @@ HealthTech, AgriTech, SaaS, D2C, DeepTech, Logistics, Others;
 (≥ 1) ⊆ `idea`, `MVP`, `growth`, `all`; `max_startups_per_month` ∈ `1`,
 `2`, `3`, `5+`; `availability` ∈ Weekdays, Weekends, Flexible.
 `linkedin_url` (optional) must be http(s); `bio` and `past_exits` are
-optional, max 300 characters.
+optional, max 300 characters. `skills` (optional, default `[]`) holds at
+most 15 functional skills of at most 80 characters each (blank entries
+and duplicates are dropped).
 
-The mentor document gets `domain = sector_expertise[0]`,
-`expertise = sector_expertise`, `stage_focus` = the single chosen stage
-(or `all`), a fresh embedding (bio / past exits / experience included in
-the embedded text), and `onboarding_completed: true`; the profile is
-mirrored onto `users.profile`.
+The mentor document gets `domain = sector_expertise[0]`, `stage_focus` =
+the single chosen stage (or `all`), `skills` plus one passage embedding
+per skill in `skill_embeddings` (used for need fit), a fresh profile
+embedding (skills / bio / past exits / experience included in the
+embedded text), and `onboarding_completed: true`; the profile is mirrored
+onto `users.profile`. `expertise` is **left unchanged**: onboarding used to
+overwrite it with the sector list, which threw away the mentor's actual
+expertise.
 
 - Response `200`: `{"success": true, "mentor_id": "...", "profile": {...}}`
 - Errors: `401`, `403`, `404` no linked mentor document, `422`, `502`.
@@ -795,27 +956,45 @@ Auth: none. `{"status": "ok", ...}` / `{"status": "healthy"}`.
 
 ## Match status lifecycle
 
-Match documents carry a `status` from this vocabulary, advanced **only
-forwards** and only for the owning user (`app/services/matches.py`):
+`app/services/matches.py` holds a `TRANSITIONS` table; `transition_match()`
+is the only writer of `status`. It checks the move against the table for
+the acting role, updates atomically (the filter includes the status it
+read, so concurrent writers can't both win) and appends
+`{from, to, by_role, by_user_id, at}` to the match's `history`.
+
+```
+suggested ──startup: request──▶ requested ──mentor: accept──▶ accepted ──startup: book──▶ meeting_scheduled
+   │  ▲                            │ ├─mentor: decline──▶ declined                         │        │
+   │  └─system: back in top 5      │ ├─startup: withdraw─▶ withdrawn                     log│  feedback│
+   ▼                               │ └─system: 7 days ───▶ expired                         ▼        ▼
+superseded (new deck)              │      (each adds a replacement suggestion)            met ──▶ completed
+```
 
 | Status | Set by | Meaning |
 |---|---|---|
-| `pending` | `POST /match` (on insert) | Matched, no outreach yet. |
-| `emailed` | `POST /email` with a `match_id` | An intro email was drafted for this match. |
-| `email_sent` | `POST /feedback-status` | The intro email was actually delivered (also sets `email_sent_at`). |
-| `accepted` | `PATCH /mentor/matches/{id}` | The mentor accepted the request. |
-| `meeting_scheduled` | `POST /calendar/book` | A Google Calendar meeting was booked (the match carries `meeting`). |
-| `completed` | `POST /feedback` | Feedback recorded; the loop is closed. |
-| `declined` | `PATCH /mentor/matches/{id}` | Terminal side-branch: the mentor declined. |
+| `suggested` | `POST /match` | In the startup's top 5; the mentor can't see it. |
+| `requested` | `POST /matches/{id}/request` (startup) | Intro email sent; waiting for the mentor. |
+| `accepted` | `PATCH /mentor/matches/{id}` (mentor) | The startup's email is now shared; it can book. |
+| `declined` | `PATCH /mentor/matches/{id}` (mentor) | Terminal; a replacement is suggested. |
+| `withdrawn` | `POST /matches/{id}/withdraw` (startup) | Terminal; a replacement is suggested. |
+| `expired` | lazily on read, after `MATCH_REQUEST_TTL_DAYS` (system) | Terminal; a replacement is suggested. |
+| `meeting_scheduled` | `POST /calendar/book` (startup) | The match carries `meeting`. |
+| `met` | first `POST /health/log` (either side) | The meeting happened. |
+| `completed` | `POST /feedback` (startup) | Rated; the mentor can still log their outcome. |
+| `superseded` | `POST /match` with a new deck (system) | Dropped out of the top 5 before any request; inactive. |
 
-`advance_match_status()` only updates a match whose current status is
-earlier in the forward list (`pending → emailed → email_sent → accepted →
-meeting_scheduled → completed`), so a status never regresses and the
-frontend's status badge / "Emails Sent" stats reflect reality; `declined`
-is never advanced from. Match documents also store `mentor_name` /
-`mentor_email` (set by `/match`; `/matches/all` and `/mentor/matches`
-backfill `mentor_name` for older documents, and `/mentor/matches` adds
-`startup_email`).
+Identity: matches are keyed on `(startup_id, mentor_id)` with one live
+document per pair (`active: true`, partial unique index
+`uniq_active_startup_mentor`); documents also carry `user_id` (owner),
+`org_id`, `cohort_id`, `profile_id`, `history[]` and, for replacements,
+`replacement_for` (the replaced `match_id`). A replacement is the best
+mentor this startup has no non-superseded match with
+(`find_matching_mentors(exclude_mentor_ids=...)`).
+
+`advance_match_status()` remains as a backward-compatible wrapper (forward
+moves only, legacy names accepted). Legacy statuses map as
+`pending` / `emailed` → `suggested` and `email_sent` → `requested`:
+`scripts/migrate_v2.py` rewrites them, and every read normalises them too.
 
 ## Scoring / matching details
 
@@ -830,32 +1009,149 @@ backfill `mentor_name` for older documents, and `/mentor/matches` adds
   - Both live in `app/services/embeddings.py` (`embed_query` /
     `embed_passage`) so this convention can't drift.
 - Vector search pulls the top 20 raw candidates (`numCandidates` = 200)
-  from Atlas, re-ranks them with the weighted formula below, and returns
-  the top 5.
-- **Weighted formula** (constants at the top of
-  `app/services/mentor_matching.py`; the weights sum to 1.0, so
-  `match_score` is in `[0, 1]`):
+  from Atlas, **pre-filtered** to `listed != false AND active != false`
+  (needs the filter fields in the index, see section 3; documents without
+  the fields pass).
+- **Eligibility** (in Python, after retrieval):
+  - mentors with `onboarding_completed: false` (registered but never
+    onboarded) are dropped; seeded / legacy documents without the flag stay;
+  - **capacity**: a mentor's load is the number of their matches in
+    `CAPACITY_LOAD_STATUSES` (`app/services/matches.py`; today
+    `email_sent`, `accepted`, `meeting_scheduled`) requested in the last 30
+    days (`email_sent_at`, else the match `timestamp`). Mentors whose load
+    has reached `max_startups_per_month` (`"5+"` counts as 8; unset means
+    unlimited) are dropped — unless fewer than 5 mentors would remain, in
+    which case they stay with their score multiplied by **0.5**.
+- The remaining candidates are re-ranked with the weighted formula below
+  and the top 5 are returned.
+- **Weighted formula** (named constants at the top of
+  `app/services/mentor_matching.py`; the weights sum to 1.0 and every term
+  is in `[0, 1]`, so `match_score` is in `[0, 1]`):
 
 ```
-final_score = cosine_score              * 0.50
-            + stage_match               * 0.20
-            + domain_match              * 0.15
-            + geography_match           * 0.05
-            + effectiveness_normalized  * 0.10
+final_score = 0.35 * similarity
+            + 0.22 * need_fit
+            + 0.15 * domain_match
+            + 0.12 * stage_match
+            + 0.05 * geography_match
+            + 0.11 * effectiveness
+            (x 0.5 for an at-capacity mentor kept by the fallback)
 ```
 
-  - `cosine_score` — the raw `$vectorSearch` score, clamped to `[0, 1]`.
+  - `similarity` — **calibrated** profile similarity. Atlas reports
+    `vectorSearchScore = (1 + cos) / 2` for a cosine index, which squeezes
+    every candidate into ~0.75–0.90; we undo it (`cos = 2s − 1`) and
+    stretch `sim = clamp((cos − 0.53) / (0.84 − 0.53), 0, 1)`. Both
+    constants (`COS_FLOOR`, `COS_CEIL`) were fitted on the eval set as the
+    5th percentile and the maximum of all candidate cosines; re-fit them if
+    the embedding model or the profile text templates change. The
+    response's `similarity` field stays the raw (clamped) Atlas score.
+  - `need_fit` — how well the mentor's **skills** cover what the startup
+    needs: each challenge and team gap is embedded on the query side
+    (`embed_queries`), compared with every skill embedding
+    (`skill_embeddings`, passage side), the per-pair cosine is calibrated
+    with its own fitted constants (`SKILL_COS_FLOOR` 0.34 / `SKILL_COS_CEIL`
+    0.75, the 5th / 99th percentile of each need's best-skill cosine), and
+    `need_fit` is the mean over needs of the best skill. The best pairs (up
+    to 3, calibrated similarity ≥ 0.5) are returned as `reasons`. A mentor
+    without skills gets a neutral 0.3 (the eval-set median); legacy
+    documents without `skills` use their non-sector `expertise` entries.
+  - `domain_match` — 1.0 if **any** of the startup's `sectors` (or its
+    `domain`) overlaps **any** of the mentor's `sector_expertise` or
+    `domain`, after `canonical_domain()` maps both sides onto the onboarding
+    vocabulary (Climate Tech → Clean Energy, AI/ML → DeepTech, E-commerce →
+    D2C, InsurTech → FinTech, Supply Chain → Logistics, …). `Others` never
+    counts as a match.
   - `stage_match` — 1.0 if `mentor.stage_focus == startup.stage`, or the
     startup's stage is in `mentor.preferred_stages`, or the mentor covers
     `all` stages (all case-insensitive), else 0.0.
-  - `domain_match` — 1.0 if `mentor.domain == startup.domain`
-    (case-insensitive), else 0.0.
-  - `geography_match` — 1.0 if both sides have a geography and they match
-    (case-insensitive), else 0.0.
-  - `effectiveness_normalized` — `(mentor.effectiveness_score or 0) / 5`,
-    so mentors with no feedback yet contribute 0. This is the feedback
-    loop: `POST /feedback` raises or lowers a mentor's average rating,
-    which changes their ranking on subsequent matches.
+  - `geography_match` — 1.0 for the same city after alias normalisation
+    (`Bengaluru`, `Bangalore, India` → `bangalore`; `Gurugram`, `New Delhi`
+    → `delhi`; `NYC` → `new york`; only the part before the first comma
+    counts), 0.5 if either side is `Remote`, else 0 (also when either side
+    is missing or `Other`).
+  - `effectiveness` — a **Bayesian average** of the ratings from feedback
+    where the startup attended: `(3 × 3.5 + Σ rating) / (3 + n)`, mapped
+    from 1–5 onto 0–1 as `(r − 1) / 4`. A new mentor therefore starts at a
+    neutral 0.625 instead of 0, and a single 1-star rating (→ 0.47) moves
+    them a little rather than sinking them. Computed per request with one
+    aggregation over the `feedback` collection; `POST /feedback` and its
+    response (`new_effectiveness_score`, the plain average) are unchanged.
+    This is the feedback loop.
+
+## Matching evaluation
+
+`scripts/eval_matching.py` runs the real pipeline (BGE embeddings, Atlas
+`$vectorSearch`, the re-rank) for every profile in
+`tests/fixtures/eval_set.json` and prints P@5, graded nDCG@5, MRR and the
+top-1 − top-5 score spread (mean and std over profiles) next to the runs
+stored in `tests/fixtures/eval_baseline.json`. It only reads, and refuses
+the shared `mentora` database without `--allow-prod-db`:
+
+```bash
+MONGODB_DB_NAME=mentora_staging venv/bin/python scripts/eval_matching.py -v
+#   --save-baseline        overwrite the stored baseline
+#   --record NAME          store this run as runs[NAME]
+#   --set COS_FLOOR=0.5    try a different module constant for one run
+#   --drop-geography       ignore the profiles' geography
+```
+
+**The eval set** has 32 startup profiles: GreenHaul and SkillBridge
+extracted for real from `test_decks/` with the pre-Phase-4 extraction
+prompt, plus 30 hand-written profiles across all onboarding sectors (and
+Gaming / InsurTech / free-text labels), all three stages and Indian and
+international cities. Relevance is graded 0–2 and keyed by the 15 seeded
+mentors' emails; other mentors (real accounts) are unjudged and removed
+from the ranking before scoring, and a seeded mentor whose email was
+changed in the database is still recognised by its seed name.
+
+**Labelling rubric** (also stored in the fixture). For each profile the
+labeller hand-assigns the startup's sectors and the seed expertise areas
+its challenges / team gaps call for (`need_tags`), using the seed mentors'
+pre-Phase-4 `domain`, `stage_focus` and `expertise` only (not the new
+`skills`). With stage distance d (0 same, 1 adjacent, 2 idea↔growth) and N
+the mentor's expertise areas among the need tags:
+grade **2** = same sector and (d = 0 and N ≥ 1, or d = 1 and N ≥ 2);
+grade **1** = any other same-sector mentor, or another sector with N ≥ 2
+and d ≤ 1; otherwise **0**. Two hand overrides carry a written reason.
+P@5 counts grade ≥ 1 as relevant, MRR looks for the first grade-2 mentor,
+nDCG uses gain 2^grade − 1.
+
+> These are **synthetic labels written by a developer**, not coordinator
+> judgements, and the rubric uses the same kinds of signals as the scorer
+> (sector, stage, expertise), so the absolute numbers flatter the system.
+> Use them to compare changes against each other. Replace them with
+> coordinator-graded matches as soon as a pilot produces some.
+
+**Results** on `mentora_staging` (17 mentors: the 15 seeded plus 2 real
+accounts), each step measured on top of the previous one:
+
+| Run | P@5 | nDCG@5 | MRR | spread mean | spread std |
+|---|---|---|---|---|---|
+| baseline (code before Phase 4) | 0.569 | 0.714 | 0.806 | 0.146 | 0.088 |
+| + similarity calibration | 0.638 | 0.788 | 0.839 | 0.263 | 0.132 |
+| + new weights, need fit off | 0.663 | 0.836 | 0.890 | 0.223 | 0.106 |
+| + need fit (skills, re-embedded mentors) | 0.675 | 0.846 | 0.894 | 0.266 | 0.129 |
+| + any-sector domain match | 0.688 | 0.858 | 0.894 | 0.271 | 0.125 |
+| + listed/active/onboarding/capacity filters | 0.688 | 0.858 | 0.894 | 0.271 | 0.125 |
+| + Bayesian effectiveness | 0.688 | 0.858 | 0.894 | 0.271 | 0.125 |
+| **final** (+ geography aliases / remote) | **0.694** | **0.861** | **0.894** | **0.271** | 0.120 |
+
+Notes:
+- The filters and the Bayesian effectiveness are neutral here by
+  construction (staging has no feedback and every judged mentor is listed,
+  onboarded and below capacity); they are kept for correctness, and are
+  covered by unit tests instead.
+- Geography is neutral on this set (`--drop-geography` gives nDCG 0.862):
+  the labels ignore location. It is kept as the small 0.05 term the plan
+  calls for, because co-location matters for in-person mentoring.
+- Ablations on the final formula (one weight set to 0): need fit off →
+  nDCG 0.855; domain off → 0.753; stage off → **0.898** (MRR 0.930). The
+  binary stage term costs ranking quality on this set because the rubric
+  gives partial credit to adjacent stages; a graded stage match (adjacent
+  = 0.5) is the obvious next experiment once real labels exist.
+- GreenHaul's top match stays Clean Energy (`Mentor 2`, then Ravi
+  Deshmukh and Chloe Dubois, both Climate Tech).
 
 ## Security notes
 
@@ -896,10 +1192,11 @@ mentora-backend/
     routers/
       auth.py                 # POST /register, POST /login, GET /me
       extract.py              # POST /extract
-      match.py                # POST /match, POST /matches/all, GET /mentors
-      email.py                # POST /email
-      feedback.py             # POST /feedback, POST /feedback-status, GET /feedback/summary
-      mentor.py               # PATCH /mentor/profile (mentor onboarding)
+      match.py                # POST /match, GET /matches, /matches/{id}/request|withdraw, POST /matches/all, GET /mentors
+      startup.py              # /startup/me, /startup/profiles (server-side startup + profile versions)
+      email.py                # POST /email (draft only)
+      feedback.py             # POST /feedback, POST /feedback-status (deprecated), GET /feedback/summary
+      mentor.py               # PATCH /mentor/profile, GET/PATCH /mentor/matches
       evaluate.py             # POST /evaluate (retrieval metrics)
       calendar.py             # /calendar/* (Google OAuth, availability, booking)
       health.py               # /health/log, /health/cohort, /health/{startup_id}
@@ -911,10 +1208,12 @@ mentora-backend/
       email_gen.py            # Groq intro-email drafting
       embeddings.py           # sentence-transformers BGE wrapper (singleton)
       mentor_matching.py      # Atlas $vectorSearch query + weighted re-rank
-      matches.py              # match de-duplication + status lifecycle + enrichment
+      matches.py              # pair identity, TRANSITIONS / transition_match, replacements, lazy expiry, enrichment
+      startups.py             # startups + versioned startup_profiles, legacy backfill
+      mailer.py               # Gmail SMTP / log delivery + `outbox` audit trail
       google_calendar.py      # Google OAuth flow, token refresh, Meet event creation
       health.py               # health score formula + trend
-      evaluation.py           # precision/recall/MRR/NDCG metric functions
+      evaluation.py           # precision/recall/MRR/NDCG (binary + graded) metric functions
       auth.py                 # bcrypt hashing + JWT issue/verify
       auth_dependency.py      # get_current_user (JWT) + get_principal (user doc + tenancy)
       tenancy.py              # orgs/cohorts, invite tokens (sha256), atomic redemption, cohort scoping
@@ -924,10 +1223,15 @@ mentora-backend/
     db/
       mongo.py                # pymongo client setup + ensure_indexes()
   tests/                       # offline pytest suite (mongomock, patched Groq)
+    fixtures/eval_set.json     # graded matching eval set (synthetic labels)
+    fixtures/eval_baseline.json # eval results: baseline + one run per change
   scripts/
     create_org.py              # bootstrap an org + cohort + first coordinator invite
-    migrate_v2.py              # idempotent tenancy backfill (--dry-run)
-  seed_mentors.py              # seeds 15 mentor profiles + embeddings
+    migrate_v2.py              # idempotent tenancy + lifecycle backfill (--dry-run)
+    eval_matching.py           # offline matching eval (P@5, nDCG@5, MRR, spread)
+    backfill_mentor_skills.py  # in-place skills + skill embeddings + re-embed
+    update_vector_index.py     # create/update the Atlas vector index definition
+  seed_mentors.py              # seeds 15 mentor profiles + skills + embeddings
   requirements.txt
   .env.example
   README.md
@@ -943,9 +1247,10 @@ mentora-backend/
   prompt for `/extract`) before failing (`500` for `/extract`, `503` for
   `/email`).
 - Rate limiting is per-process (see Security notes).
-- `/email` only *drafts* an email; delivery happens in the frontend
-  (Resend, via its `/api/send-email` route), which then calls
-  `POST /feedback-status` to move the match to `email_sent`.
+- `/email` only *drafts* an email; `POST /matches/{id}/request` delivers
+  it from the backend (Gmail SMTP, or `log` mode — see "Email").
+- Expiry of unanswered requests is lazy (applied when matches or stats
+  are read); there is no background scheduler.
 - Network calls to Groq and MongoDB Atlas only succeed once you've
   supplied real credentials in `.env` and created the Atlas Vector Search
   index described above.

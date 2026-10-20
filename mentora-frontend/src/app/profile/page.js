@@ -1,12 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
 import {
   AlertTriangle,
+  Building2,
   CheckCircle2,
+  FileUp,
+  Pencil,
   Globe2,
   Layers,
   Lightbulb,
@@ -29,10 +32,14 @@ import {
   AccordionTrigger,
   AccordionContent,
 } from "@/components/ui/accordion";
-import { matchMentors } from "@/lib/api";
-import { getStoredProfile, setStoredMatches } from "@/lib/storage";
+import { StateCard, InlineError } from "@/components/StateCard";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { useStartupJourney } from "@/hooks/use-startup-journey";
+import { matchMentors, updateActiveProfile, updateStartup } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { toStartupProfilePayload } from "@/components/matches/matchData";
 
 const DEFAULT_CONFIDENCE = 75;
 const MAX_LIST_ITEMS = 4;
@@ -197,31 +204,211 @@ function FieldCardsSkeleton() {
   );
 }
 
-function ProfilePageContent() {
-  const router = useRouter();
-  const [profile, setProfile] = useState(null);
-  const [loading, setLoading] = useState(false);
+const STAGES = [
+  { value: "idea", label: "Idea" },
+  { value: "MVP", label: "MVP" },
+  { value: "growth", label: "Growth" },
+];
 
-  useEffect(() => {
-    // getStoredProfile() returns null for a missing *or* malformed profile;
-    // either way there's nothing to review, so send the user back to upload.
-    const stored = getStoredProfile();
-    if (!stored) {
-      toast.info("Please upload your pitch deck first", { id: "profile-missing" });
-      router.replace("/upload");
+function linesOf(text) {
+  return String(text || "")
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** Correct the extracted fields; saving creates a new profile version. */
+function ProfileEditor({ profile, onCancel, onSaved }) {
+  const [domain, setDomain] = useState(profile.domain || "");
+  const [stage, setStage] = useState(profile.stage || "MVP");
+  const [geography, setGeography] = useState(profile.geography || "");
+  const [challenges, setChallenges] = useState((profile.challenges || []).join("\n"));
+  const [teamGaps, setTeamGaps] = useState((profile.team_gaps || []).join("\n"));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleSave(e) {
+    e.preventDefault();
+    if (!domain.trim()) {
+      setError("Domain can't be empty.");
       return;
     }
-    setProfile(stored);
-  }, [router]);
+    setSaving(true);
+    setError("");
+    try {
+      const me = await updateActiveProfile({
+        domain: domain.trim(),
+        stage,
+        geography: geography.trim() || null,
+        challenges: linesOf(challenges),
+        team_gaps: linesOf(teamGaps),
+      });
+      toast.success(`Profile saved as version ${me?.active_profile?.version ?? ""}`.trim());
+      onSaved(me);
+    } catch (err) {
+      setError(err.message || "Could not save your profile.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Correct your profile</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={handleSave} className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="profile-domain">Domain</Label>
+              <Input id="profile-domain" value={domain} onChange={(e) => setDomain(e.target.value)} maxLength={80} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="profile-geography">Geography</Label>
+              <Input
+                id="profile-geography"
+                value={geography}
+                onChange={(e) => setGeography(e.target.value)}
+                placeholder="e.g. Bangalore"
+                maxLength={120}
+              />
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <span id="profile-stage-label" className="text-sm font-medium">
+              Stage
+            </span>
+            <ToggleGroup
+              variant="outline"
+              size="sm"
+              value={[stage]}
+              onValueChange={(next) => {
+                const picked = next.find((v) => v !== stage) ?? next[0];
+                if (picked) setStage(picked);
+              }}
+              aria-labelledby="profile-stage-label"
+            >
+              {STAGES.map((s) => (
+                <ToggleGroupItem
+                  key={s.value}
+                  value={s.value}
+                  className="px-3 aria-pressed:border-primary/50 aria-pressed:bg-primary/15 aria-pressed:text-primary"
+                >
+                  {s.label}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="profile-challenges">Challenges (one per line)</Label>
+              <Textarea
+                id="profile-challenges"
+                rows={5}
+                value={challenges}
+                onChange={(e) => setChallenges(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="profile-gaps">Team gaps (one per line)</Label>
+              <Textarea id="profile-gaps" rows={5} value={teamGaps} onChange={(e) => setTeamGaps(e.target.value)} />
+            </div>
+          </div>
+          {error && <InlineError message={error} />}
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" onClick={onCancel} disabled={saving}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={saving}>
+              {saving && <Loader2 className="animate-spin" aria-hidden="true" />}
+              {saving ? "Saving…" : "Save new version"}
+            </Button>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+function CompanyName({ startup, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const current = startup?.company_name || "";
+
+  async function handleSave(e) {
+    e.preventDefault();
+    if (!value.trim()) return;
+    setSaving(true);
+    try {
+      onSaved(await updateStartup({ company_name: value.trim() }));
+      setEditing(false);
+      toast.success("Company name saved");
+    } catch (err) {
+      if (err.status !== 0) toast.error(err.message || "Could not save the company name.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!editing) {
+    return (
+      <div className="mb-6 flex flex-wrap items-center gap-2 text-sm">
+        <Building2 className="h-4 w-4 text-primary" aria-hidden="true" />
+        <span className={current ? "font-semibold" : "text-muted-foreground"}>{current || "No company name yet"}</span>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          onClick={() => {
+            setValue(current);
+            setEditing(true);
+          }}
+          disabled={!startup}
+        >
+          <Pencil aria-hidden="true" />
+          {current ? "Rename" : "Add company name"}
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <form onSubmit={handleSave} className="mb-6 flex flex-wrap items-end gap-2">
+      <div className="space-y-1.5">
+        <Label htmlFor="company-name">Company name</Label>
+        <Input
+          id="company-name"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          maxLength={120}
+          className="w-64"
+          autoFocus
+        />
+      </div>
+      <Button type="submit" size="sm" disabled={saving || !value.trim()}>
+        {saving && <Loader2 className="animate-spin" aria-hidden="true" />}
+        Save
+      </Button>
+      <Button type="button" size="sm" variant="ghost" onClick={() => setEditing(false)} disabled={saving}>
+        Cancel
+      </Button>
+    </form>
+  );
+}
+
+function ProfilePageContent() {
+  const router = useRouter();
+  const { startup, profile, loaded, error, reload, applyStartup } = useStartupJourney({ withMatches: false });
+  const [loading, setLoading] = useState(false);
+  const [editing, setEditing] = useState(false);
 
   async function handleFindMentors() {
     if (!profile || loading) return;
     setLoading(true);
     try {
-      // /match takes a StartupProfile only — never send deck_feedback.
-      const data = await matchMentors(toStartupProfilePayload(profile));
-      const matches = Array.isArray(data) ? data : data?.matches || [];
-      setStoredMatches(matches);
+      // Empty body: the backend matches on the active server-side profile.
+      await matchMentors();
       router.push("/matches");
     } catch (err) {
       // Network failures already raised the "Server unavailable" toast.
@@ -232,7 +419,28 @@ function ProfilePageContent() {
     }
   }
 
-  // Hydrating (or redirecting away).
+  if (!profile && loaded) {
+    return (
+      <PageWrapper key="empty" className="max-w-lg">
+        {error ? (
+          <InlineError message={error}>
+            <Button type="button" size="sm" variant="outline" onClick={reload}>
+              Try again
+            </Button>
+          </InlineError>
+        ) : (
+          <StateCard
+            icon={FileUp}
+            title="No profile yet"
+            description="Upload your pitch deck and we'll extract your startup profile from it."
+            actions={<Button render={<Link href="/upload" />}>Upload a pitch deck</Button>}
+          />
+        )}
+      </PageWrapper>
+    );
+  }
+
+  // First load (no cached profile yet).
   if (!profile) {
     return (
       <PageWrapper key="loading">
@@ -259,19 +467,40 @@ function ProfilePageContent() {
       <div className="grid gap-8 lg:grid-cols-5">
         {/* Left — extracted profile (60%) */}
         <div className="min-w-0 lg:col-span-3">
-          <div className="mb-6 flex items-start justify-between gap-4">
+          <div className="mb-4 flex items-start justify-between gap-4">
             <div>
               <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Here&apos;s what we understood</h1>
               <p className="mt-2 text-sm text-muted-foreground">
                 Review your profile before we find your matches.
+                {profile.version ? ` Version ${profile.version}` : ""}
+                {profile.deck_filename ? ` · ${profile.deck_filename}` : ""}
               </p>
             </div>
-            <Button variant="ghost" size="sm" render={<Link href="/upload" />} className="shrink-0">
-              Re-upload
-            </Button>
+            <div className="flex shrink-0 gap-1">
+              {!editing && (
+                <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>
+                  <Pencil aria-hidden="true" />
+                  Edit
+                </Button>
+              )}
+              <Button variant="ghost" size="sm" render={<Link href="/upload" />}>
+                Re-upload
+              </Button>
+            </div>
           </div>
 
-          {loading ? (
+          <CompanyName startup={startup} onSaved={applyStartup} />
+
+          {editing ? (
+            <ProfileEditor
+              profile={profile}
+              onCancel={() => setEditing(false)}
+              onSaved={(me) => {
+                applyStartup(me);
+                setEditing(false);
+              }}
+            />
+          ) : loading ? (
             <FieldCardsSkeleton />
           ) : (
             <Stagger className="grid gap-5 sm:grid-cols-2" stagger={0.08}>
@@ -324,7 +553,7 @@ function ProfilePageContent() {
               <Button variant="ghost" size="sm" render={<Link href="/upload" />}>
                 Re-upload
               </Button>
-              <Button size="sm" onClick={handleFindMentors} disabled={loading}>
+              <Button size="sm" onClick={handleFindMentors} disabled={loading || editing}>
                 Continue Anyway →
               </Button>
             </div>
@@ -344,7 +573,7 @@ function ProfilePageContent() {
           <Button
             type="button"
             onClick={handleFindMentors}
-            disabled={loading}
+            disabled={loading || editing}
             size="lg"
             className="h-11 w-full text-base"
           >

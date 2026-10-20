@@ -49,6 +49,7 @@ from app.models.schemas import (
     CalendarStatusResponse,
 )
 from app.services import google_calendar as gcal
+from app.services import matches as match_service
 from app.services.auth_dependency import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -326,7 +327,8 @@ async def book_meeting(request: BookingRequest, user=Depends(get_current_user)) 
         raise HTTPException(status_code=403, detail="You do not have access to this match.")
     if str(match_doc.get("mentor_id") or "") != request.mentor_id:
         raise HTTPException(status_code=400, detail="mentor_id does not correspond to the mentor on this match.")
-    if match_doc.get("status") not in BOOKABLE_STATUSES:
+    current_status = match_service.normalise_status(match_doc.get("status"))
+    if current_status not in BOOKABLE_STATUSES:
         raise HTTPException(
             status_code=409, detail="A meeting can only be booked once the mentor has accepted the match."
         )
@@ -401,17 +403,19 @@ async def book_meeting(request: BookingRequest, user=Depends(get_current_user)) 
     }
     now = datetime.now(timezone.utc).isoformat()
     try:
-        matches.update_one(
-            {"_id": match_doc["_id"]},
-            {
-                "$set": {
-                    "status": "meeting_scheduled",
-                    "meeting": meeting,
-                    "status_updated_at": now,
-                    "updated_at": now,
-                }
-            },
-        )
+        if current_status == match_service.ACCEPTED:
+            match_service.transition_match(
+                match_doc["match_id"],
+                match_service.STARTUP,
+                user_id,
+                match_service.MEETING_SCHEDULED,
+                {"meeting": meeting},
+                doc=match_doc,
+            )
+        else:
+            # Re-booking an already scheduled meeting only replaces the meeting
+            # (reschedule / cancel proper arrives with Phase 3).
+            matches.update_one({"_id": match_doc["_id"]}, {"$set": {"meeting": meeting, "updated_at": now}})
     except Exception:
         # The event exists on both calendars; don't hide that from the user.
         logger.exception("Meeting booked but failed to update match %s", request.match_id)

@@ -17,6 +17,7 @@ Used for:
   * POST /login   - keyed by client IP, to slow password brute-forcing.
   * POST /extract - keyed by user id, because each call costs Groq tokens.
   * POST /email   - same.
+  * POST /matches/{id}/request - keyed by user id, because it sends email.
 """
 import logging
 import threading
@@ -80,11 +81,17 @@ llm_limiter = SlidingWindowRateLimiter(
     window_seconds=settings.LLM_RATE_WINDOW_SECONDS,
 )
 
+match_request_limiter = SlidingWindowRateLimiter(
+    limit=settings.MATCH_REQUEST_RATE_LIMIT,
+    window_seconds=settings.MATCH_REQUEST_RATE_WINDOW_SECONDS,
+)
+
 
 def reset_all_limiters() -> None:
     """Clear all rate-limit state (used by tests)."""
     login_limiter.reset()
     llm_limiter.reset()
+    match_request_limiter.reset()
 
 
 def client_ip(request: Request) -> str:
@@ -123,3 +130,8 @@ def rate_limit_login(request: Request) -> None:
 def rate_limit_llm_for_user(user_id: str) -> None:
     """Throttle expensive LLM-backed endpoints per authenticated user id."""
     _enforce(llm_limiter, f"llm:{user_id or 'anonymous'}", "llm endpoint")
+
+
+def rate_limit_match_request_for_user(user_id: str) -> None:
+    """Throttle intro requests (each one sends an email) per user id."""
+    _enforce(match_request_limiter, f"match-request:{user_id or 'anonymous'}", "match request")

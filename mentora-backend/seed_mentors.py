@@ -14,7 +14,15 @@ the embedding model. Mentors who registered through the app are kept.
 
 Each seeded mentor gets a realistic but fake contact email on the
 clearly fake `mentors.mentora.dev` domain (do not expect delivery), used by the frontend's
-"send intro email" flow.
+"send intro email" flow, plus a list of functional `skills` (stored with
+one passage embedding per skill in `skill_embeddings`) that the matcher
+compares against a startup's challenges and team gaps.
+
+WARNING: never run this against the shared `mentora` database - it deletes
+every seeded mentor first (and therefore breaks existing match records that
+point at them). It refuses to unless --yes-clear-mentora is passed. To add
+skills / re-embed an existing database in place, use
+scripts/backfill_mentor_skills.py instead.
 
 Note: passage-side text is embedded WITHOUT the BGE query instruction
 prefix, matching the convention used for query-side embeddings in
@@ -25,7 +33,7 @@ from typing import List, TypedDict
 
 from app.config import settings
 from app.db.mongo import get_mentors_collection
-from app.services.embeddings import build_mentor_profile_text, embed_passage
+from app.services.embeddings import build_mentor_profile_text, embed_passage, embed_passages
 
 
 class MentorSeed(TypedDict):
@@ -35,6 +43,9 @@ class MentorSeed(TypedDict):
     expertise: List[str]
     geography: str
     email: str
+    # Functional skills, matched one-by-one against a startup's challenges
+    # and team gaps (need_fit in app/services/mentor_matching.py).
+    skills: List[str]
 
 
 MENTORS: List[MentorSeed] = [
@@ -45,6 +56,12 @@ MENTORS: List[MentorSeed] = [
         "stage_focus": "idea",
         "expertise": ["Fundraising", "Product-Market Fit", "Regulatory Compliance"],
         "geography": "San Francisco, CA",
+        "skills": [
+            "Pre-seed and seed fundraising",
+            "Fintech licensing and regulatory compliance",
+            "Payments product strategy",
+            "Customer discovery and product-market fit",
+        ],
     },
     {
         "name": "Marcus Reid",
@@ -53,6 +70,12 @@ MENTORS: List[MentorSeed] = [
         "stage_focus": "growth",
         "expertise": ["B2B Sales", "Go-to-Market", "Scaling Operations"],
         "geography": "New York, NY",
+        "skills": [
+            "Enterprise B2B sales for financial services",
+            "Go-to-market strategy for fintech products",
+            "Scaling operations and customer support",
+            "Building and managing sales teams",
+        ],
     },
     {
         "name": "Priya Nair",
@@ -61,6 +84,12 @@ MENTORS: List[MentorSeed] = [
         "stage_focus": "MVP",
         "expertise": ["Product-Market Fit", "Clinical Partnerships", "Regulatory Compliance"],
         "geography": "Bangalore, India",
+        "skills": [
+            "Clinical validation and pilot studies",
+            "Hospital and clinic partnerships",
+            "Medical device and health data regulation",
+            "Healthcare product-market fit",
+        ],
     },
     {
         "name": "David Okafor",
@@ -69,6 +98,12 @@ MENTORS: List[MentorSeed] = [
         "stage_focus": "growth",
         "expertise": ["Fundraising", "Hiring", "Go-to-Market"],
         "geography": "London, UK",
+        "skills": [
+            "Series A and B fundraising",
+            "Hiring senior leadership teams",
+            "Healthcare go-to-market and sales",
+            "Expanding a health business to new markets",
+        ],
     },
     {
         "name": "Elena Petrova",
@@ -77,6 +112,12 @@ MENTORS: List[MentorSeed] = [
         "stage_focus": "idea",
         "expertise": ["Product-Market Fit", "User Research", "Curriculum Design"],
         "geography": "Remote",
+        "skills": [
+            "Curriculum and learning experience design",
+            "User research with students and teachers",
+            "Early product-market fit validation",
+            "Pedagogy and learning science",
+        ],
     },
     {
         "name": "Tom Sullivan",
@@ -85,6 +126,12 @@ MENTORS: List[MentorSeed] = [
         "stage_focus": "MVP",
         "expertise": ["Go-to-Market", "B2B Sales", "Partnerships"],
         "geography": "Boston, MA",
+        "skills": [
+            "Selling to schools and universities",
+            "Education go-to-market strategy",
+            "Partnerships with institutions and nonprofits",
+            "Designing a B2B sales process",
+        ],
     },
     {
         "name": "Sofia Marquez",
@@ -93,6 +140,12 @@ MENTORS: List[MentorSeed] = [
         "stage_focus": "MVP",
         "expertise": ["Technical Architecture", "Product-Market Fit", "Hiring"],
         "geography": "Austin, TX",
+        "skills": [
+            "Software architecture and scalability",
+            "Cloud infrastructure for SaaS platforms",
+            "Hiring early engineering teams",
+            "Product-market fit for B2B SaaS",
+        ],
     },
     {
         "name": "James Whitfield",
@@ -101,6 +154,12 @@ MENTORS: List[MentorSeed] = [
         "stage_focus": "growth",
         "expertise": ["B2B Sales", "Fundraising", "Scaling Operations"],
         "geography": "New York, NY",
+        "skills": [
+            "Enterprise SaaS sales leadership",
+            "Series A to C fundraising",
+            "Scaling customer success and operations",
+            "Revenue operations and pricing",
+        ],
     },
     {
         "name": "Grace Kim",
@@ -109,6 +168,12 @@ MENTORS: List[MentorSeed] = [
         "stage_focus": "idea",
         "expertise": ["Go-to-Market", "Branding", "Supply Chain"],
         "geography": "Seoul, South Korea",
+        "skills": [
+            "Consumer brand building",
+            "Social media and influencer marketing",
+            "Sourcing and supply chain setup",
+            "Launch go-to-market for consumer products",
+        ],
     },
     {
         "name": "Ben Alaoui",
@@ -117,6 +182,12 @@ MENTORS: List[MentorSeed] = [
         "stage_focus": "growth",
         "expertise": ["Fundraising", "Scaling Operations", "B2B Sales"],
         "geography": "Dubai, UAE",
+        "skills": [
+            "Growth-stage fundraising",
+            "Scaling fulfilment and warehouse operations",
+            "Supplier negotiations and B2B partnerships",
+            "Marketplace unit economics",
+        ],
     },
     {
         "name": "Nadia Hassan",
@@ -125,6 +196,12 @@ MENTORS: List[MentorSeed] = [
         "stage_focus": "idea",
         "expertise": ["Technical Architecture", "Product-Market Fit", "Hiring"],
         "geography": "Remote",
+        "skills": [
+            "Machine learning system architecture",
+            "LLM application design",
+            "Hiring ML engineers",
+            "Validating AI product ideas with customers",
+        ],
     },
     {
         "name": "Liam O'Connor",
@@ -133,6 +210,12 @@ MENTORS: List[MentorSeed] = [
         "stage_focus": "MVP",
         "expertise": ["Fundraising", "Technical Architecture", "Go-to-Market"],
         "geography": "Dublin, Ireland",
+        "skills": [
+            "Raising seed rounds for AI startups",
+            "ML infrastructure and model deployment",
+            "Go-to-market for AI products",
+            "Running enterprise AI pilots",
+        ],
     },
     {
         "name": "Chloe Dubois",
@@ -141,6 +224,12 @@ MENTORS: List[MentorSeed] = [
         "stage_focus": "idea",
         "expertise": ["Fundraising", "Product-Market Fit", "Regulatory Compliance"],
         "geography": "Paris, France",
+        "skills": [
+            "Climate tech fundraising and grants",
+            "Energy and environmental regulation",
+            "Early customer validation for climate products",
+            "Impact investor relations",
+        ],
     },
     {
         "name": "Ravi Deshmukh",
@@ -149,6 +238,12 @@ MENTORS: List[MentorSeed] = [
         "stage_focus": "growth",
         "expertise": ["Go-to-Market", "B2B Sales", "Scaling Operations"],
         "geography": "Bangalore, India",
+        "skills": [
+            "Enterprise sales of energy and climate solutions",
+            "Go-to-market with industrial customers",
+            "Scaling field operations",
+            "Utility and energy partnerships",
+        ],
     },
     {
         "name": "Hannah Fischer",
@@ -157,12 +252,44 @@ MENTORS: List[MentorSeed] = [
         "stage_focus": "idea",
         "expertise": ["Product-Market Fit", "User Research", "Hiring"],
         "geography": "Berlin, Germany",
+        "skills": [
+            "Customer interviews and user research",
+            "MVP scoping and prioritisation",
+            "Recruiting a founding team",
+            "Product-market fit for early-stage SaaS",
+        ],
     },
 ]
 
 
+def seed_mentor_fields(mentor: MentorSeed) -> dict:
+    """The embedding-bearing fields of one seeded mentor: `skills`, one
+    passage embedding per skill (`skill_embeddings`) and the profile
+    `embedding`. Shared with scripts/backfill_mentor_skills.py so seeding and
+    in-place backfills produce identical documents."""
+    text = build_mentor_profile_text(
+        domain=mentor["domain"],
+        stage_focus=mentor["stage_focus"],
+        expertise=mentor["expertise"],
+        skills=mentor["skills"],
+    )
+    return {
+        "skills": list(mentor["skills"]),
+        "skill_embeddings": embed_passages(mentor["skills"]),
+        "embedding": embed_passage(text),
+    }
+
+
 def main() -> None:
-    print(f"Connecting to MongoDB at {settings.MONGODB_URI!r}, db={settings.MONGODB_DB_NAME!r} ...")
+    if settings.MONGODB_DB_NAME == "mentora" and "--yes-clear-mentora" not in sys.argv[1:]:
+        print(
+            "Refusing to delete the seeded mentors of the shared 'mentora' database. Use "
+            "scripts/backfill_mentor_skills.py to update it in place, or pass --yes-clear-mentora.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # The URI is never printed: it carries the database password.
+    print(f"Connecting to MongoDB, db={settings.MONGODB_DB_NAME!r} ...")
     collection = get_mentors_collection()
 
     print(f"Clearing previously seeded documents in '{collection.name}' collection ...")
@@ -174,12 +301,8 @@ def main() -> None:
 
     docs = []
     for i, mentor in enumerate(MENTORS, start=1):
-        text = build_mentor_profile_text(
-            domain=mentor["domain"],
-            stage_focus=mentor["stage_focus"],
-            expertise=mentor["expertise"],
-        )
-        embedding = embed_passage(text)
+        fields = seed_mentor_fields(mentor)
+        embedding = fields["embedding"]
 
         if len(embedding) != settings.EMBEDDING_DIMENSIONS:
             print(
@@ -198,7 +321,7 @@ def main() -> None:
                 "email": mentor["email"],
                 "preferred_stages": [mentor["stage_focus"]],
                 "seeded": True,
-                "embedding": embedding,
+                **fields,
                 # No feedback yet for freshly seeded mentors; left unset until
                 # POST /feedback recomputes it as a rolling average rating.
                 "effectiveness_score": None,

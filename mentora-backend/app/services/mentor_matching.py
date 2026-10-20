@@ -3,78 +3,212 @@ Mentor matching: queries MongoDB Atlas Vector Search for mentors whose
 embeddings are closest to the startup profile embedding, then combines
 similarity with several weighted match factors.
 
+Pipeline:
+  1. $vectorSearch over mentor profile embeddings, pre-filtered to mentors
+     that are not `listed: false` / `active: false` (VECTOR_SEARCH_FILTER).
+  2. Eligibility: drop mentors with `onboarding_completed: false` (legacy and
+     seeded documents without the flag stay), then the capacity rule (see
+     apply_eligibility / CAPACITY_*).
+  3. Re-rank with the weighted formula and return the top TOP_K_RESULTS.
+
 Score convention: match_score is a float in the 0-1 range, computed as
 
-    final_score = cosine_score * 0.5
-                + stage_match * 0.2
-                + domain_match * 0.15
-                + geography_match * 0.05
-                + effectiveness_score_normalized * 0.10
+    final_score = 0.35 * similarity
+                + 0.22 * need_fit
+                + 0.15 * domain_match
+                + 0.12 * stage_match
+                + 0.05 * geography_match
+                + 0.11 * effectiveness
+    (x CAPACITY_PENALTY = 0.5 for an at-capacity mentor kept by the fallback)
 
-where:
-  - cosine_score is the raw $vectorSearch score, clamped to [0, 1].
-  - stage_match is 1.0 if mentor.stage_focus == startup.stage, or the
-    startup's stage is in mentor.preferred_stages, or the mentor covers
-    "all" stages (all case-insensitive), else 0.0.
-  - domain_match is 1.0 if mentor.domain and startup.domain name the same
-    domain after `canonical_domain()` (case/spacing-insensitive, with known
-    synonyms folded together, e.g. "Climate Tech" == "Clean Energy"), else 0.0.
-  - geography_match is 1.0 if mentor.geography == startup.geography (case-insensitive,
-    both present), else 0.0.
-  - effectiveness_score_normalized = (mentor.effectiveness_score or 0.0) / 5.0
-    (mentors with no feedback yet contribute 0 here).
+where every term is in [0, 1]:
+  - similarity: the Atlas vectorSearchScore s turned back into a cosine
+    (cos = 2s - 1) and stretched with COS_FLOOR / COS_CEIL
+    (calibrate_similarity).
+  - need_fit: mean over the startup's challenges + team gaps of the best
+    calibrated cosine to any of the mentor's `skills` (query-embedded needs
+    vs stored passage-embedded `skill_embeddings`); NEED_FIT_UNKNOWN for a
+    mentor without skills. The best pairs are returned as MentorMatch.reasons.
+  - domain_match: 1.0 if any of the startup's `sectors` (or its `domain`)
+    overlaps any of the mentor's `sector_expertise` / `domain` after
+    canonical_domain() maps both onto the MentorSector vocabulary ("Others"
+    never matches).
+  - stage_match: 1.0 if mentor.stage_focus / preferred_stages cover the
+    startup's stage (or "all").
+  - geography_match: 1.0 same city after normalise_geography() aliases
+    ("Bengaluru" == "Bangalore, India"), 0.5 if either side is Remote, else 0.
+  - effectiveness: Bayesian average of attended ratings,
+    (3 * 3.5 + sum) / (3 + n), mapped from 1-5 onto 0-1, so a new mentor
+    scores a neutral 0.625.
+
+The weights are the module constants below (they sum to 1.0); see README
+"Scoring / matching details" and scripts/eval_matching.py for how each
+change was measured.
 """
 import logging
-from typing import Iterable, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+import numpy as np
 from fastapi import HTTPException
 
 from app.config import settings
-from app.db.mongo import get_mentors_collection
+from app.db.mongo import get_feedback_collection, get_matches_collection, get_mentors_collection
 from app.models.schemas import MentorMatch, StartupProfile
-from app.services.embeddings import build_startup_profile_text, embed_query
+from app.services.matches import CAPACITY_LOAD_STATUSES, status_in
+from app.services.embeddings import build_startup_profile_text, embed_passages, embed_queries, embed_query
 
 logger = logging.getLogger(__name__)
 
-# --- Weighted-scoring formula weights --------------------------------------
-COSINE_WEIGHT = 0.5
-STAGE_MATCH_WEIGHT = 0.2
+# --- Weighted-scoring formula weights (sum to 1.0) --------------------------
+SIMILARITY_WEIGHT = 0.35
+NEED_FIT_WEIGHT = 0.22
 DOMAIN_MATCH_WEIGHT = 0.15
+STAGE_MATCH_WEIGHT = 0.12
 GEOGRAPHY_MATCH_WEIGHT = 0.05
-EFFECTIVENESS_WEIGHT = 0.10
+EFFECTIVENESS_WEIGHT = 0.11
+# Backward-compatible alias (the profile-level similarity used to be called
+# the cosine term).
+COSINE_WEIGHT = SIMILARITY_WEIGHT
+# ---------------------------------------------------------------------------
+
+# --- Similarity calibration -------------------------------------------------
+# Atlas returns vectorSearchScore = (1 + cos) / 2 for cosine indexes, so the
+# raw score of every candidate sits in a narrow ~0.75-0.90 band. We undo
+# that mapping (cos = 2s - 1) and stretch the band that BGE cosines actually
+# occupy onto [0, 1]. Both constants were fitted on the eval set
+# (tests/fixtures/eval_set.json, 32 profiles x 17 staging mentors, mentor
+# embeddings including skills): COS_FLOOR ~ 5th percentile of all candidate
+# cosines (0.534), COS_CEIL ~ the best cosine seen (0.836). Re-fit them
+# (scripts/eval_matching.py --set COS_FLOOR=...) if the embedding model or
+# the profile text templates change.
+COS_FLOOR = 0.53
+COS_CEIL = 0.84
+# ---------------------------------------------------------------------------
+
+# --- Need fit (startup challenges / team gaps vs mentor skills) --------------
+# Per-pair cosines between a query-embedded need and a passage-embedded skill
+# are short-text cosines with their own range, so they get their own
+# constants, fitted on the eval set (32 profiles x 15 seeded mentors): the
+# 5th and 99th percentile of each need's best-skill cosine.
+SKILL_COS_FLOOR = 0.34
+SKILL_COS_CEIL = 0.75
+# need_fit of a mentor without any skills (nothing to compare against): a
+# neutral prior at the eval-set median calibrated need_fit (~0.32), so legacy
+# accounts that never filled in skills are neither boosted nor buried.
+NEED_FIT_UNKNOWN = 0.3
+# At most this many startup needs are compared (long LLM lists add noise).
+MAX_NEEDS = 12
+# `reasons` lists up to MAX_REASONS need -> skill pairs whose calibrated
+# similarity is at least REASON_MIN_SIMILARITY.
+MAX_REASONS = 3
+REASON_MIN_SIMILARITY = 0.5
 # ---------------------------------------------------------------------------
 
 # How many raw candidates to pull from vector search before re-ranking.
 VECTOR_SEARCH_CANDIDATE_LIMIT = 20
 TOP_K_RESULTS = 5
 
+# --- Eligibility filters ----------------------------------------------------
+# Pre-filter inside $vectorSearch (needs `listed` / `active` declared as
+# filter fields in the Atlas index, see README). `$ne: false` keeps legacy
+# documents that do not have the fields yet.
+VECTOR_SEARCH_FILTER = {"$and": [{"listed": {"$ne": False}}, {"active": {"$ne": False}}]}
+# Capacity: a mentor whose load (matches in CAPACITY_LOAD_STATUSES whose
+# request was made in the last CAPACITY_WINDOW_DAYS) has reached their
+# max_startups_per_month is dropped - unless fewer than
+# MIN_ELIGIBLE_BEFORE_FALLBACK mentors would remain, in which case the
+# full mentors stay in with their score multiplied by CAPACITY_PENALTY.
+CAPACITY_WINDOW_DAYS = 30
+CAPACITY_PENALTY = 0.5
+MIN_ELIGIBLE_BEFORE_FALLBACK = 5
+# max_startups_per_month values ("1", "2", "3", "5+") -> monthly capacity.
+CAPACITY_BY_SETTING = {"1": 1, "2": 2, "3": 3, "5+": 8}
+# ---------------------------------------------------------------------------
+
+# --- Bayesian effectiveness -------------------------------------------------
+# rating = (C*m + sum of ratings) / (C + n) over feedback where the meeting
+# was attended, so a mentor with no ratings sits at the prior mean m (3.5/5,
+# normalised to 0.625) instead of 0, and one 1-star rating moves them only
+# a little. Normalised onto [0, 1] as (rating - 1) / 4.
+EFFECTIVENESS_PRIOR_COUNT = 3     # C
+EFFECTIVENESS_PRIOR_MEAN = 3.5    # m
+# ---------------------------------------------------------------------------
+
 # Stage value meaning "mentors startups at any stage".
 ALL_STAGES = "all"
 
-# Synonym groups for domain_match. The LLM extraction prompt suggests labels
-# like "Climate Tech" while mentor onboarding offers "Clean Energy", so an
-# exact string compare would never credit those mentors for climate decks.
-# Keys are normalised (lowercase, alphanumerics only); values are canonical.
+# Synonym groups for domain_match, mapping every label we see onto the
+# MentorSector vocabulary of mentor onboarding (app/models/schemas.py): the
+# LLM used to answer "Climate Tech" / "AI/ML" / "E-commerce", the seeded
+# mentors use those labels too, while onboarded mentors pick "Clean Energy" /
+# "DeepTech" / "D2C". Keys are normalised (lowercase, alphanumerics only);
+# values are the MentorSector labels.
 _DOMAIN_SYNONYMS = {
     **dict.fromkeys(
-        ["cleanenergy", "climatetech", "climate", "cleantech", "greentech", "renewableenergy", "renewables"],
-        "clean energy",
+        ["cleanenergy", "climatetech", "climate", "cleantech", "greentech", "renewableenergy", "renewables",
+         "energy", "ev", "electricvehicles", "sustainability"],
+        "Clean Energy",
     ),
-    **dict.fromkeys(["fintech", "financialtechnology"], "fintech"),
-    **dict.fromkeys(["healthtech", "healthcare", "medtech"], "healthtech"),
-    **dict.fromkeys(["edtech", "education", "educationtechnology"], "edtech"),
-    **dict.fromkeys(["agritech", "agtech", "agriculture"], "agritech"),
-    **dict.fromkeys(["ecommerce", "eretail"], "e-commerce"),
-    **dict.fromkeys(["saas", "b2bsaas"], "saas"),
-    **dict.fromkeys(["aiml", "ai", "artificialintelligence", "machinelearning"], "ai/ml"),
+    **dict.fromkeys(
+        ["fintech", "financialtechnology", "insurtech", "insurance", "wealthtech", "lending", "payments",
+         "regtech", "neobanking", "crypto", "web3"],
+        "FinTech",
+    ),
+    **dict.fromkeys(["healthtech", "healthcare", "medtech", "digitalhealth", "healthtechnology"], "HealthTech"),
+    **dict.fromkeys(["edtech", "education", "educationtechnology", "edutech"], "EdTech"),
+    **dict.fromkeys(["agritech", "agtech", "agriculture", "foodtech", "agrifoodtech"], "AgriTech"),
+    **dict.fromkeys(
+        ["d2c", "directtoconsumer", "ecommerce", "eretail", "retail", "consumer", "consumerbrands",
+         "quickcommerce", "qcommerce"],
+        "D2C",
+    ),
+    **dict.fromkeys(["saas", "b2bsaas", "software", "enterprisesoftware", "devtools"], "SaaS"),
+    **dict.fromkeys(
+        ["deeptech", "aiml", "ai", "artificialintelligence", "machinelearning", "ml", "robotics", "quantum",
+         "semiconductors", "spacetech", "hardware"],
+        "DeepTech",
+    ),
+    **dict.fromkeys(["logistics", "supplychain", "freight", "shipping", "transportation"], "Logistics"),
+    **dict.fromkeys(["others", "other"], "Others"),
 }
+# A catch-all label carries no signal: two "Others" never count as a match.
+_NON_MATCHING_SECTORS = {"", "Others"}
 
 
 def canonical_domain(domain: Optional[str]) -> str:
-    """Normalise a domain label so synonyms compare equal ("" if blank)."""
+    """Normalise a domain label onto the MentorSector vocabulary so synonyms
+    compare equal; unknown labels come back lower-cased ("" if blank)."""
     raw = (domain or "").strip().lower()
     key = "".join(ch for ch in raw if ch.isalnum())
     return _DOMAIN_SYNONYMS.get(key, raw)
+
+
+def canonical_sectors(labels: Iterable[Optional[str]]) -> set:
+    """Canonical, matchable sectors of a list of labels (blank/Others dropped)."""
+    return {canonical_domain(label) for label in labels if label} - _NON_MATCHING_SECTORS
+
+
+def _domain_matches(profile: StartupProfile, candidate: Dict[str, Any]) -> bool:
+    """True if any of the startup's sectors (or its domain) overlaps any of
+    the mentor's sector_expertise or domain, after canonical_domain()."""
+    startup = canonical_sectors(list(getattr(profile, "sectors", None) or []) + [profile.domain])
+    mentor_labels = candidate.get("sector_expertise")
+    mentor_labels = list(mentor_labels) if isinstance(mentor_labels, (list, tuple)) else []
+    mentor = canonical_sectors(mentor_labels + [candidate.get("domain")])
+    return bool(startup & mentor)
+
+
+def calibrate_similarity(vector_search_score: float) -> float:
+    """Map an Atlas cosine vectorSearchScore onto a 0-1 similarity that
+    actually spreads candidates apart (see COS_FLOOR / COS_CEIL)."""
+    cosine = 2.0 * float(vector_search_score) - 1.0
+    return max(0.0, min(1.0, (cosine - COS_FLOOR) / (COS_CEIL - COS_FLOOR)))
+
+
+def calibrate_skill_similarity(cosine):
+    """Calibrate need-to-skill cosine(s) (float or numpy array) onto [0, 1]."""
+    return np.clip((np.asarray(cosine, dtype=float) - SKILL_COS_FLOOR) / (SKILL_COS_CEIL - SKILL_COS_FLOOR), 0.0, 1.0)
 
 
 def _stage_matches(profile_stage: str, stage_focus: Optional[str], preferred_stages: Optional[Iterable]) -> bool:
@@ -86,6 +220,247 @@ def _stage_matches(profile_stage: str, stage_focus: Optional[str], preferred_sta
     if not stages:
         return False
     return ALL_STAGES in stages or (bool(profile_stage) and profile_stage in stages)
+
+
+# --- need fit -------------------------------------------------------------------
+
+def startup_needs(profile: StartupProfile) -> List[str]:
+    """The startup's challenges followed by its team gaps (stripped,
+    de-duplicated, capped at MAX_NEEDS)."""
+    needs: List[str] = []
+    seen = set()
+    for item in list(profile.challenges or []) + list(profile.team_gaps or []):
+        text = str(item or "").strip()
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            needs.append(text)
+    return needs[:MAX_NEEDS]
+
+
+def mentor_skills(candidate: Dict[str, Any]) -> List[str]:
+    """A mentor's skills; legacy documents without `skills` fall back to
+    their `expertise` entries that are not just sector names (onboarding
+    used to overwrite expertise with the sector list)."""
+    skills = [str(s).strip() for s in (candidate.get("skills") or []) if str(s or "").strip()]
+    if skills:
+        return skills
+    sector_like = {canonical_domain(s) for s in (candidate.get("sector_expertise") or [])}
+    sector_like.add(canonical_domain(candidate.get("domain")))
+    sector_like.update(_DOMAIN_SYNONYMS.values())
+    expertise = [str(e).strip() for e in (candidate.get("expertise") or []) if str(e or "").strip()]
+    return [e for e in expertise if canonical_domain(e) not in sector_like]
+
+
+def _skill_matrices(candidates: Sequence[Dict[str, Any]]) -> List[Optional[np.ndarray]]:
+    """Per candidate, a (skills x dim) matrix of normalised skill embeddings
+    (None if the mentor has no skills). Stored `skill_embeddings` are used
+    when they line up with the skills; anything missing is embedded in one
+    batch call."""
+    matrices: List[Optional[np.ndarray]] = [None] * len(candidates)
+    missing: List[Tuple[int, List[str]]] = []
+    for index, candidate in enumerate(candidates):
+        skills = mentor_skills(candidate)
+        if not skills:
+            continue
+        stored = candidate.get("skill_embeddings")
+        if candidate.get("skills") and isinstance(stored, list) and len(stored) == len(skills) and stored:
+            matrices[index] = np.asarray(stored, dtype=float)
+        else:
+            missing.append((index, skills))
+    if missing:
+        flat = [skill for _, skills in missing for skill in skills]
+        vectors = embed_passages(flat)
+        offset = 0
+        for index, skills in missing:
+            matrices[index] = np.asarray(vectors[offset: offset + len(skills)], dtype=float)
+            offset += len(skills)
+    return matrices
+
+
+def compute_need_fit(
+    needs: Sequence[str],
+    need_vectors: Optional[np.ndarray],
+    skills: Sequence[str],
+    skill_matrix: Optional[np.ndarray],
+) -> Tuple[float, List[str]]:
+    """need_fit = mean over needs of the best calibrated similarity to any
+    of the mentor's skills; plus the best need -> skill pairs as reasons.
+
+    Returns (NEED_FIT_UNKNOWN, []) for a mentor without skills and
+    (0.0, []) for a startup without needs.
+    """
+    if not needs or need_vectors is None or len(need_vectors) == 0:
+        return 0.0, []
+    if not skills or skill_matrix is None or len(skill_matrix) == 0:
+        return NEED_FIT_UNKNOWN, []
+    similarity = calibrate_skill_similarity(need_vectors @ skill_matrix.T)  # needs x skills
+    best_skill = similarity.argmax(axis=1)
+    best = similarity.max(axis=1)
+    need_fit = float(best.mean())
+
+    reasons: List[str] = []
+    used_skills = set()
+    for need_index in np.argsort(-best, kind="stable"):
+        if len(reasons) >= MAX_REASONS or best[need_index] < REASON_MIN_SIMILARITY:
+            break
+        skill_index = int(best_skill[need_index])
+        if skill_index in used_skills:
+            continue
+        used_skills.add(skill_index)
+        reasons.append(f"{needs[int(need_index)]} → {skills[skill_index]}")
+    return need_fit, reasons
+
+
+# --- eligibility / capacity -----------------------------------------------------
+
+def is_onboarded(candidate: Dict[str, Any]) -> bool:
+    """Onboarded mentors, plus legacy / seeded documents that predate the
+    `onboarding_completed` flag. Registered-but-not-onboarded mentors
+    (flag explicitly False) are not matched."""
+    return candidate.get("onboarding_completed", True) is not False
+
+
+def monthly_capacity(setting: Any) -> Optional[int]:
+    """Monthly capacity from max_startups_per_month (None = unlimited)."""
+    if setting is None:
+        return None
+    return CAPACITY_BY_SETTING.get(str(setting).strip())
+
+
+def recent_loads(mentor_ids: Sequence[str], now: Optional[datetime] = None) -> Dict[str, int]:
+    """Per mentor id, the number of matches in CAPACITY_LOAD_STATUSES (legacy
+    spellings included) whose request time - requested_at, else the legacy
+    email_sent_at, else the match timestamp - is within the last
+    CAPACITY_WINDOW_DAYS. De-duplicated legacy copies are not counted. A database failure is logged and treated as no
+    load - capacity must never fail a /match request."""
+    if not mentor_ids:
+        return {}
+    cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=CAPACITY_WINDOW_DAYS)).isoformat()
+    pipeline = [
+        {
+            "$match": {
+                "mentor_id": {"$in": list(mentor_ids)},
+                "status": status_in(CAPACITY_LOAD_STATUSES),
+                "duplicate_of": {"$exists": False},
+                "$or": [
+                    {"requested_at": {"$gte": cutoff}},
+                    {"requested_at": {"$exists": False}, "email_sent_at": {"$gte": cutoff}},
+                    {
+                        "requested_at": {"$exists": False},
+                        "email_sent_at": {"$exists": False},
+                        "timestamp": {"$gte": cutoff},
+                    },
+                ],
+            }
+        },
+        {"$group": {"_id": "$mentor_id", "load": {"$sum": 1}}},
+    ]
+    try:
+        return {str(row["_id"]): int(row["load"]) for row in get_matches_collection().aggregate(pipeline)}
+    except Exception:
+        logger.exception("Failed to compute mentor capacity loads; ignoring capacity for this request")
+        return {}
+
+
+def apply_eligibility(candidates: List[dict], now: Optional[datetime] = None) -> Tuple[List[dict], set]:
+    """Drop non-onboarded mentors, then apply the capacity rule.
+
+    Returns (remaining candidates, ids of at-capacity mentors whose score
+    must be multiplied by CAPACITY_PENALTY - non-empty only in the
+    fallback case where dropping them would leave fewer than
+    MIN_ELIGIBLE_BEFORE_FALLBACK mentors).
+    """
+    onboarded = [c for c in candidates if is_onboarded(c)]
+    loads = recent_loads([str(c.get("_id", "")) for c in onboarded], now=now)
+    full = set()
+    for candidate in onboarded:
+        capacity = monthly_capacity(candidate.get("max_startups_per_month"))
+        mentor_id = str(candidate.get("_id", ""))
+        if capacity is not None and loads.get(mentor_id, 0) >= capacity:
+            full.add(mentor_id)
+    available = [c for c in onboarded if str(c.get("_id", "")) not in full]
+    if len(available) >= MIN_ELIGIBLE_BEFORE_FALLBACK:
+        return available, set()
+    return onboarded, full
+
+
+# --- geography ------------------------------------------------------------------
+
+# City aliases (normalised: lowercase, no punctuation) -> canonical city.
+_CITY_ALIASES = {
+    "bengaluru": "bangalore", "blr": "bangalore",
+    "bombay": "mumbai", "navi mumbai": "mumbai",
+    "new delhi": "delhi", "delhi ncr": "delhi", "ncr": "delhi", "gurgaon": "delhi", "gurugram": "delhi",
+    "noida": "delhi",
+    "madras": "chennai", "calcutta": "kolkata", "poona": "pune",
+    "nyc": "new york", "new york city": "new york", "manhattan": "new york",
+    "sf": "san francisco", "bay area": "san francisco", "san francisco bay area": "san francisco",
+}
+REMOTE = "remote"
+# Placeholder answers that say nothing about location.
+_NO_LOCATION = {"", "other", "others", "unknown", "n/a", "na", "none", "null", "global", "worldwide"}
+GEOGRAPHY_REMOTE_SCORE = 0.5
+
+
+def normalise_geography(value: Optional[str]) -> str:
+    """Canonical city for a geography string ("" if unknown, "remote").
+
+    "Bangalore, India", "Bengaluru" and "bangalore" all become "bangalore":
+    only the part before the first comma is kept, then aliases apply.
+    """
+    raw = (value or "").strip().lower()
+    if not raw:
+        return ""
+    if REMOTE in raw.replace("-", " ").split() or raw.startswith(REMOTE):
+        return REMOTE
+    city = raw.split(",")[0].strip()
+    city = " ".join("".join(ch if ch.isalnum() else " " for ch in city).split())
+    city = _CITY_ALIASES.get(city, city)
+    return "" if city in _NO_LOCATION else city
+
+
+def geography_score(startup_geography: Optional[str], mentor_geography: Optional[str]) -> float:
+    """1.0 same city, GEOGRAPHY_REMOTE_SCORE if either side is remote, else 0."""
+    startup, mentor = normalise_geography(startup_geography), normalise_geography(mentor_geography)
+    if not startup or not mentor:
+        return 0.0
+    if REMOTE in (startup, mentor):
+        return GEOGRAPHY_REMOTE_SCORE
+    return 1.0 if startup == mentor else 0.0
+
+
+# --- effectiveness ------------------------------------------------------------
+
+def bayesian_rating(rating_sum: float, rating_count: int) -> float:
+    """Bayesian-average 1-5 rating with prior EFFECTIVENESS_PRIOR_MEAN
+    weighted as EFFECTIVENESS_PRIOR_COUNT ratings."""
+    c, m = EFFECTIVENESS_PRIOR_COUNT, EFFECTIVENESS_PRIOR_MEAN
+    return (c * m + float(rating_sum)) / (c + int(rating_count))
+
+
+def normalised_effectiveness(rating_sum: float = 0.0, rating_count: int = 0) -> float:
+    """Bayesian rating mapped from 1-5 onto 0-1 (no ratings -> 0.625)."""
+    return max(0.0, min(1.0, (bayesian_rating(rating_sum, rating_count) - 1.0) / 4.0))
+
+
+def attended_rating_stats(mentor_ids: Sequence[str]) -> Dict[str, Tuple[float, int]]:
+    """Per mentor id, (sum, count) of numeric ratings from feedback where the
+    startup attended the meeting - one aggregation for all candidates. A
+    database failure is logged and every mentor is treated as unrated."""
+    if not mentor_ids:
+        return {}
+    pipeline = [
+        {"$match": {"mentor_id": {"$in": list(mentor_ids)}, "attended": True, "rating": {"$type": "number"}}},
+        {"$group": {"_id": "$mentor_id", "total": {"$sum": "$rating"}, "count": {"$sum": 1}}},
+    ]
+    try:
+        return {
+            str(row["_id"]): (float(row["total"]), int(row["count"]))
+            for row in get_feedback_collection().aggregate(pipeline)
+        }
+    except Exception:
+        logger.exception("Failed to aggregate mentor ratings; using the neutral prior for this request")
+        return {}
 
 
 NO_MENTORS_MESSAGE = "No mentor profiles found. Please seed the database."
@@ -121,6 +496,7 @@ def _run_vector_search(embedding: List[float]) -> List[dict]:
                 "queryVector": embedding,
                 "numCandidates": VECTOR_SEARCH_CANDIDATE_LIMIT * 10,
                 "limit": VECTOR_SEARCH_CANDIDATE_LIMIT,
+                "filter": VECTOR_SEARCH_FILTER,
             }
         },
         {
@@ -128,12 +504,17 @@ def _run_vector_search(embedding: List[float]) -> List[dict]:
                 "_id": 1,
                 "name": 1,
                 "domain": 1,
+                "sector_expertise": 1,
                 "stage_focus": 1,
                 "expertise": 1,
+                "skills": 1,
+                "skill_embeddings": 1,
                 "geography": 1,
                 "email": 1,
                 "preferred_stages": 1,
                 "effectiveness_score": 1,
+                "onboarding_completed": 1,
+                "max_startups_per_month": 1,
                 "score": {"$meta": "vectorSearchScore"},
             }
         },
@@ -156,8 +537,15 @@ def _run_vector_search(embedding: List[float]) -> List[dict]:
         ) from exc
 
 
-def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
-    """Find and rank the top mentors for a given startup profile."""
+def find_matching_mentors(
+    profile: StartupProfile, exclude_mentor_ids: Optional[Iterable[str]] = None
+) -> List[MentorMatch]:
+    """Find and rank the top mentors for a given startup profile.
+
+    `exclude_mentor_ids` (mentors-collection ids) are dropped before ranking,
+    e.g. mentors the startup already has a match with when picking a
+    replacement suggestion.
+    """
     profile_text = build_startup_profile_text(
         domain=profile.domain,
         stage=profile.stage,
@@ -167,40 +555,49 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
     query_embedding = embed_query(profile_text)
 
     candidates = _run_vector_search(query_embedding)
+    if exclude_mentor_ids:
+        excluded = {str(mentor_id) for mentor_id in exclude_mentor_ids}
+        candidates = [c for c in candidates if str(c.get("_id", "")) not in excluded]
+    candidates, penalised_ids = apply_eligibility(candidates)
 
     if not candidates:
         return []
 
-    profile_domain = canonical_domain(profile.domain)
+    needs = startup_needs(profile)
+    need_vectors = np.asarray(embed_queries(needs), dtype=float) if needs else None
+    skill_matrices = _skill_matrices(candidates)
+    rating_stats = attended_rating_stats([str(c.get("_id", "")) for c in candidates])
+
     profile_stage = (profile.stage or "").strip().lower()
-    profile_geography = (profile.geography or "").strip().lower()
 
     ranked: List[MentorMatch] = []
-    for candidate in candidates:
-        cosine_score = max(0.0, min(1.0, float(candidate.get("score", 0.0))))
+    for candidate, skill_matrix in zip(candidates, skill_matrices):
+        raw_score = max(0.0, min(1.0, float(candidate.get("score", 0.0))))
+        similarity = calibrate_similarity(raw_score)
+        need_fit, reasons = compute_need_fit(needs, need_vectors, mentor_skills(candidate), skill_matrix)
 
-        candidate_domain = canonical_domain(candidate.get("domain"))
-        candidate_geography = (candidate.get("geography") or "").strip().lower()
-        candidate_effectiveness = candidate.get("effectiveness_score")
 
         stage_match = (
             1.0
             if _stage_matches(profile_stage, candidate.get("stage_focus"), candidate.get("preferred_stages"))
             else 0.0
         )
-        domain_match = 1.0 if candidate_domain and candidate_domain == profile_domain else 0.0
-        geography_match = (
-            1.0 if profile_geography and candidate_geography and candidate_geography == profile_geography else 0.0
+        domain_match = 1.0 if _domain_matches(profile, candidate) else 0.0
+        geography_match = geography_score(profile.geography, candidate.get("geography"))
+        effectiveness_score_normalized = normalised_effectiveness(
+            *rating_stats.get(str(candidate.get("_id", "")), (0.0, 0))
         )
-        effectiveness_score_normalized = (candidate_effectiveness or 0.0) / 5.0
 
         final_score = (
-            cosine_score * COSINE_WEIGHT
+            similarity * SIMILARITY_WEIGHT
+            + need_fit * NEED_FIT_WEIGHT
             + stage_match * STAGE_MATCH_WEIGHT
             + domain_match * DOMAIN_MATCH_WEIGHT
             + geography_match * GEOGRAPHY_MATCH_WEIGHT
             + effectiveness_score_normalized * EFFECTIVENESS_WEIGHT
         )
+        if str(candidate.get("_id", "")) in penalised_ids:
+            final_score *= CAPACITY_PENALTY
         final_score = max(0.0, min(1.0, final_score))
 
         ranked.append(
@@ -213,7 +610,8 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
                 match_score=round(final_score, 4),
                 email=candidate.get("email"),
                 geography=candidate.get("geography"),
-                similarity=round(cosine_score, 4),
+                similarity=round(raw_score, 4),
+                reasons=reasons,
             )
         )
 

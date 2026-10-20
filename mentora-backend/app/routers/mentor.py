@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.db.mongo import get_mentors_collection, get_users_collection
 from app.models.schemas import MentorProfileUpdate, MentorProfileUpdateResponse
 from app.services.auth_dependency import get_current_user
-from app.services.embeddings import build_mentor_profile_text, embed_passage
+from app.services.embeddings import build_mentor_profile_text, embed_passage, embed_passages
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +56,11 @@ async def update_mentor_profile(
 ) -> MentorProfileUpdateResponse:
     """Save the mentor's onboarding profile and re-embed it.
 
-    `domain`, `expertise` and `stage_focus` are derived from the submitted
-    sectors and preferred stages so the matching pipeline (which reads
-    those fields) sees the new profile. Errors: 403 for non-mentor
+    `domain` and `stage_focus` are derived from the submitted sectors and
+    preferred stages so the matching pipeline (which reads those fields)
+    sees the new profile; `skills` are stored with one embedding each
+    (`skill_embeddings`) for need-fit matching. `expertise` is left as it
+    was (it is no longer overwritten with the sectors). Errors: 403 for non-mentor
     accounts, 404 if the account has no linked mentor document, 422 on
     invalid input, 502 if embedding or the database write fails.
     """
@@ -75,7 +77,7 @@ async def update_mentor_profile(
 
     mentors = get_mentors_collection()
     try:
-        existing = mentors.find_one({"_id": mentor_object_id}, {"_id": 1})
+        existing = mentors.find_one({"_id": mentor_object_id}, {"_id": 1, "expertise": 1})
     except Exception:
         logger.exception("Failed to load mentor %s", mentor_object_id)
         raise HTTPException(status_code=502, detail="Could not load your mentor profile. Please try again shortly.")
@@ -83,23 +85,28 @@ async def update_mentor_profile(
         raise HTTPException(status_code=404, detail="No mentor profile is linked to this account.")
 
     stage_focus = derive_stage_focus(request.preferred_stages)
+    # `expertise` is deliberately NOT overwritten with the sector list any
+    # more (that made it useless for matching); sectors live in
+    # `sector_expertise`, functional skills in `skills`.
     profile: Dict[str, Any] = {
         **request.model_dump(),
         "domain": request.sector_expertise[0],
-        "expertise": list(request.sector_expertise),
         "stage_focus": stage_focus,
     }
+    expertise = list(existing.get("expertise") or [])
 
     text = build_mentor_profile_text(
         domain=profile["domain"],
         stage_focus=stage_focus,
-        expertise=profile["expertise"],
+        expertise=expertise,
+        skills=request.skills,
         bio=request.bio,
         past_exits=request.past_exits,
         years_experience=request.years_experience,
     )
     try:
         embedding = embed_passage(text)
+        skill_embeddings = embed_passages(request.skills)
     except Exception as exc:
         logger.exception("Failed to embed updated profile for mentor %s", mentor_object_id)
         raise HTTPException(
@@ -116,6 +123,7 @@ async def update_mentor_profile(
                     **profile,
                     "email": user_doc.get("email"),
                     "embedding": embedding,
+                    "skill_embeddings": skill_embeddings,
                     "onboarding_completed": True,
                     "updated_at": now,
                 }
@@ -145,130 +153,136 @@ async def update_mentor_profile(
 
 
 # ---------------------------------------------------------------------------
-# GET /mentor/matches  — incoming match requests for the signed-in mentor
-# PATCH /mentor/matches/:match_id  — accept or decline a specific request
+# GET /mentor/matches  — the signed-in mentor's intro requests (requested+)
+# PATCH /mentor/matches/:match_id  — accept or decline a request
 # ---------------------------------------------------------------------------
 
-from datetime import datetime  # noqa: E402 (already imported above via timezone)
 from typing import Optional  # noqa: E402
 
 from fastapi import Query  # noqa: E402
 
 from app.db.mongo import get_matches_collection  # noqa: E402
-from app.services.matches import enrich_match_docs  # noqa: E402
-
-
-def _mentor_object_id_from_user(user_doc: dict) -> Optional[ObjectId]:
-    """Return the mentors-collection ObjectId linked to this user, or None."""
-    raw = user_doc.get("mentor_id")
-    if not raw:
-        return None
-    try:
-        return ObjectId(str(raw))
-    except (InvalidId, TypeError):
-        return None
-
-
-def _jsonable_match(doc: dict) -> dict:
-    """Serialize a match document so it is JSON-safe."""
-    out = {}
-    for key, value in doc.items():
-        if isinstance(value, ObjectId):
-            out[key] = str(value)
-        elif isinstance(value, datetime):
-            out[key] = value.isoformat()
-        else:
-            out[key] = value
-    return out
+from app.services import matches as match_service  # noqa: E402
+from app.services.auth_dependency import Principal, get_principal  # noqa: E402
+from app.services.mailer import frontend_url, notify  # noqa: E402
 
 
 @router.get("/mentor/matches")
 async def get_mentor_matches(
     status: Optional[str] = Query(default=None, description="Comma-separated status filter"),
-    user=Depends(get_current_user),
+    principal: Principal = Depends(get_principal),
 ) -> dict:
-    """Return all match documents where `mentor_id` matches the signed-in mentor.
+    """The signed-in mentor's matches from `requested` on (never `suggested`
+    or `superseded`: those are the startup's private shortlist).
 
-    Optional ?status=accepted,met filter (comma-separated). Only available to
-    users registered with role "mentor".
+    Optional ?status=requested,accepted filter (legacy spellings accepted),
+    intersected with what a mentor may see. Each item carries `company_name`
+    and `startup_summary`; `startup_email` is only filled in from `accepted`
+    on. Requests older than the TTL are expired first.
     """
-    if user.get("role") != "mentor":
+    if principal.role != "mentor":
         raise HTTPException(status_code=403, detail="Only mentor accounts can view their match requests.")
-
-    user_id = str(user.get("sub", ""))
-    user_doc = _load_user(user_id)
-
-    mentor_object_id = _mentor_object_id_from_user(user_doc)
-    if mentor_object_id is None:
+    if not principal.mentor_id:
         return {"matches": []}
 
-    mentor_id_str = str(mentor_object_id)
-    query: dict = {"mentor_id": mentor_id_str}
-
+    visible = list(match_service.REQUESTED_OR_LATER)
     if status:
-        statuses = [s.strip() for s in status.split(",") if s.strip()]
-        if statuses:
-            query["status"] = {"$in": statuses}
+        wanted = {match_service.normalise_status(s.strip()) for s in status.split(",") if s.strip()}
+        visible = [s for s in visible if s in wanted]
+        if not visible:
+            return {"matches": []}
 
+    scope = {"mentor_id": principal.mentor_id}
     try:
-        matches_col = get_matches_collection()
-        docs = list(matches_col.find(query).sort("timestamp", -1))
+        match_service.expire_stale_requests(scope)
+        docs = list(
+            get_matches_collection()
+            .find({**scope, "status": match_service.status_in(visible), "duplicate_of": {"$exists": False}})
+            .sort("timestamp", -1)
+        )
     except Exception:
-        logger.exception("Failed to load mentor matches for mentor %s", mentor_id_str)
+        logger.exception("Failed to load mentor matches for mentor %s", principal.mentor_id)
         raise HTTPException(status_code=502, detail="Could not load your match requests. Please try again shortly.")
 
-    return {"matches": enrich_match_docs([_jsonable_match(doc) for doc in docs], include_startup_email=True)}
+    return {"matches": match_service.mentor_view(docs)}
+
+
+def _notify_startup(doc: dict, decision: str) -> None:
+    """Tell the startup its request was accepted / declined (best effort)."""
+    owner = None
+    try:
+        owner = get_users_collection().find_one({"_id": ObjectId(str(doc.get("user_id")))}, {"email": 1})
+    except (InvalidId, TypeError):
+        owner = None
+    except Exception:
+        logger.exception("Failed to load the startup owner of match %s", doc.get("match_id"))
+    if not owner or not owner.get("email"):
+        return
+    mentor = doc.get("mentor_name") or "The mentor"
+    link = frontend_url("/matches")
+    if decision == match_service.ACCEPTED:
+        subject = f"{mentor} accepted your intro request"
+        body = (
+            f"Good news: {mentor} accepted your introduction request on Mentora.\n\n"
+            f"Book a meeting with them here: {link}\n"
+        )
+    else:
+        replacement = get_matches_collection().find_one({"replacement_for": doc.get("match_id")}, {"_id": 1})
+        subject = f"{mentor} declined your intro request"
+        body = (
+            f"{mentor} isn't able to take on your request right now.\n\n"
+            + ("We've added a new mentor suggestion to your matches: " if replacement else "See your other matches: ")
+            + f"{link}\n"
+        )
+    notify(to=owner["email"], subject=subject, body=body, kind=f"request_{decision}", match_id=doc.get("match_id"))
 
 
 @router.patch("/mentor/matches/{match_id}")
 async def update_mentor_match_status(
     match_id: str,
     body: dict,
-    user=Depends(get_current_user),
+    principal: Principal = Depends(get_principal),
 ) -> dict:
-    """Accept or decline a specific match request.
+    """Accept or decline an intro request (uuid `match_id` or Mongo `_id`).
 
-    Body: { "status": "accepted" | "declined" }
-    Only the mentor linked to that match may update it.
+    Body: { "status": "accepted" | "declined" }. Goes through the lifecycle
+    state machine, so only a `requested` match can be answered (a match can
+    never move backwards); repeating the same answer is a no-op 200.
+    Errors: 403 not your match, 404 unknown, 409 not answerable, 422 bad status.
     """
-    if user.get("role") != "mentor":
+    if principal.role != "mentor":
         raise HTTPException(status_code=403, detail="Only mentor accounts can update match requests.")
 
-    new_status = (body.get("status") or "").strip()
-    if new_status not in ("accepted", "declined"):
+    new_status = (body.get("status") or "").strip() if isinstance(body, dict) else ""
+    if new_status not in (match_service.ACCEPTED, match_service.DECLINED):
         raise HTTPException(status_code=422, detail="status must be 'accepted' or 'declined'.")
 
-    user_id = str(user.get("sub", ""))
-    user_doc = _load_user(user_id)
-    mentor_object_id = _mentor_object_id_from_user(user_doc)
-    mentor_id_str = str(mentor_object_id) if mentor_object_id else None
-
     try:
-        match_object_id = ObjectId(match_id)
-    except (InvalidId, TypeError):
-        raise HTTPException(status_code=404, detail="Match not found.")
-
-    matches_col = get_matches_collection()
-    try:
-        doc = matches_col.find_one({"_id": match_object_id})
+        doc = match_service.find_match(match_id)
     except Exception:
         logger.exception("Failed to find match %s", match_id)
         raise HTTPException(status_code=502, detail="Could not load match. Please try again shortly.")
-
     if not doc:
         raise HTTPException(status_code=404, detail="Match not found.")
-
-    # Authorise: only the mentor whose id is on the match may update it.
-    if doc.get("mentor_id") != mentor_id_str:
+    if not principal.mentor_id or str(doc.get("mentor_id") or "") != principal.mentor_id:
         raise HTTPException(status_code=403, detail="You are not the mentor on this match.")
 
+    current = match_service.normalise_status(doc.get("status"))
+    if current == new_status:
+        return {"success": True, "status": new_status, "match_id": doc.get("match_id")}
+    if current not in match_service.REQUESTED_OR_LATER:
+        # Suggestions are invisible to mentors; answer as if it didn't exist.
+        raise HTTPException(status_code=404, detail="Match not found.")
+
     try:
-        matches_col.update_one(
-            {"_id": match_object_id},
-            {"$set": {"status": new_status, "updated_at": datetime.now(timezone.utc).isoformat()}},
+        updated = match_service.transition_match(
+            doc.get("match_id") or doc["_id"], match_service.MENTOR, principal.user_id, new_status, doc=doc
         )
+    except match_service.TransitionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     except Exception:
         logger.exception("Failed to update match %s", match_id)
         raise HTTPException(status_code=502, detail="Could not update match status. Please try again shortly.")
 
-    return {"success": True, "status": new_status}
+    _notify_startup(updated, new_status)
+    return {"success": True, "status": new_status, "match_id": updated.get("match_id")}
