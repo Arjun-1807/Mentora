@@ -16,7 +16,9 @@ where:
   - stage_match is 1.0 if mentor.stage_focus == startup.stage, or the
     startup's stage is in mentor.preferred_stages, or the mentor covers
     "all" stages (all case-insensitive), else 0.0.
-  - domain_match is 1.0 if mentor.domain == startup.domain (case-insensitive), else 0.0.
+  - domain_match is 1.0 if mentor.domain and startup.domain name the same
+    domain after `canonical_domain()` (case/spacing-insensitive, with known
+    synonyms folded together, e.g. "Climate Tech" == "Clean Energy"), else 0.0.
   - geography_match is 1.0 if mentor.geography == startup.geography (case-insensitive,
     both present), else 0.0.
   - effectiveness_score_normalized = (mentor.effectiveness_score or 0.0) / 5.0
@@ -48,6 +50,31 @@ TOP_K_RESULTS = 5
 
 # Stage value meaning "mentors startups at any stage".
 ALL_STAGES = "all"
+
+# Synonym groups for domain_match. The LLM extraction prompt suggests labels
+# like "Climate Tech" while mentor onboarding offers "Clean Energy", so an
+# exact string compare would never credit those mentors for climate decks.
+# Keys are normalised (lowercase, alphanumerics only); values are canonical.
+_DOMAIN_SYNONYMS = {
+    **dict.fromkeys(
+        ["cleanenergy", "climatetech", "climate", "cleantech", "greentech", "renewableenergy", "renewables"],
+        "clean energy",
+    ),
+    **dict.fromkeys(["fintech", "financialtechnology"], "fintech"),
+    **dict.fromkeys(["healthtech", "healthcare", "medtech"], "healthtech"),
+    **dict.fromkeys(["edtech", "education", "educationtechnology"], "edtech"),
+    **dict.fromkeys(["agritech", "agtech", "agriculture"], "agritech"),
+    **dict.fromkeys(["ecommerce", "eretail"], "e-commerce"),
+    **dict.fromkeys(["saas", "b2bsaas"], "saas"),
+    **dict.fromkeys(["aiml", "ai", "artificialintelligence", "machinelearning"], "ai/ml"),
+}
+
+
+def canonical_domain(domain: Optional[str]) -> str:
+    """Normalise a domain label so synonyms compare equal ("" if blank)."""
+    raw = (domain or "").strip().lower()
+    key = "".join(ch for ch in raw if ch.isalnum())
+    return _DOMAIN_SYNONYMS.get(key, raw)
 
 
 def _stage_matches(profile_stage: str, stage_focus: Optional[str], preferred_stages: Optional[Iterable]) -> bool:
@@ -144,7 +171,7 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
     if not candidates:
         return []
 
-    profile_domain = (profile.domain or "").strip().lower()
+    profile_domain = canonical_domain(profile.domain)
     profile_stage = (profile.stage or "").strip().lower()
     profile_geography = (profile.geography or "").strip().lower()
 
@@ -152,7 +179,7 @@ def find_matching_mentors(profile: StartupProfile) -> List[MentorMatch]:
     for candidate in candidates:
         cosine_score = max(0.0, min(1.0, float(candidate.get("score", 0.0))))
 
-        candidate_domain = (candidate.get("domain") or "").strip().lower()
+        candidate_domain = canonical_domain(candidate.get("domain"))
         candidate_geography = (candidate.get("geography") or "").strip().lower()
         candidate_effectiveness = candidate.get("effectiveness_score")
 

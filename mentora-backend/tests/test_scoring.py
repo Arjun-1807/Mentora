@@ -161,3 +161,22 @@ def test_match_exposes_similarity_email_and_geography(fake_vector_search):
     assert match.similarity == pytest.approx(0.83)
     assert match.email == "ava@example.com"
     assert match.geography == "San Francisco, CA"
+
+
+@pytest.mark.parametrize(
+    "startup_domain, mentor_domain, expected",
+    [
+        ("Climate Tech", "Clean Energy", 0.15),
+        ("CleanTech", "clean energy", 0.15),
+        ("E-commerce", "Ecommerce", 0.15),
+        ("FinTech", "Fintech", 0.15),
+        ("Climate Tech", "HealthTech", 0.0),
+        ("Climate Tech", "", 0.0),
+    ],
+)
+def test_domain_synonyms_count_as_domain_match(fake_vector_search, startup_domain, mentor_domain, expected):
+    fake_vector_search(
+        [_candidate(score=0.0, domain=mentor_domain, stage_focus="idea", geography="Berlin", effectiveness_score=None)]
+    )
+    profile = PROFILE.model_copy(update={"domain": startup_domain})
+    assert find_matching_mentors(profile)[0].match_score == pytest.approx(expected)

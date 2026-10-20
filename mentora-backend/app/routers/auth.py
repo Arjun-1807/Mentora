@@ -30,6 +30,7 @@ from app.models.schemas import (
 from app.services.auth import create_access_token, hash_password, verify_password
 from app.services.auth_dependency import get_current_user
 from app.services.embeddings import build_mentor_profile_text, embed_passage
+from app.services.google_calendar import has_calendar_tokens
 from app.services.rate_limit import rate_limit_login
 
 logger = logging.getLogger(__name__)
@@ -112,7 +113,8 @@ def _rollback_mentor(mentor_object_id: Optional[ObjectId]) -> None:
 
 @router.post("/register", response_model=TokenResponse)
 async def register(request: RegisterRequest) -> TokenResponse:
-    """Register a new user (startup or mentor). Mentors are also inserted
+    """Register a new user (startup, mentor or coordinator; only mentors
+    need a profile). Mentors are also inserted
     into the `mentors` collection so they're immediately matchable, and
     the two documents are cross-linked via `users.mentor_id`."""
     users = get_users_collection()
@@ -225,4 +227,5 @@ async def me(user=Depends(get_current_user)) -> MeResponse:
         profile=doc.get("profile") or {},
         mentor_id=doc.get("mentor_id"),
         created_at=doc.get("created_at"),
+        calendar_connected=has_calendar_tokens(doc),
     )

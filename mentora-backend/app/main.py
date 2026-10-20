@@ -17,7 +17,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
 from app.db.mongo import ensure_indexes
-from app.routers import auth, email, evaluate, extract, feedback, match, mentor
+from app.routers import auth, calendar, email, evaluate, extract, feedback, health, match, mentor, stats
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ app = FastAPI(
     title="Mentora API",
     description="Startup-mentor matching backend: extracts structured startup "
     "profiles from pitch decks and matches them to mentors via vector search.",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -77,9 +77,21 @@ def _validation_message(errors: List[dict]) -> str:
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(_: Request, exc: StarletteHTTPException) -> JSONResponse:
     message = _error_message(exc.detail, exc.status_code)
+    content: dict = {"error": message, "detail": message}
+    if isinstance(exc.detail, dict):
+        # Structured errors (e.g. {"error": "calendar_not_connected",
+        # "user": "mentor", "detail": "..."}) keep their extra keys; `error`
+        # and `detail` are always strings.
+        extra = {key: value for key, value in exc.detail.items() if key not in ("error", "detail")}
+        detail = exc.detail.get("detail")
+        content = {
+            **jsonable_encoder(extra),
+            "error": message,
+            "detail": detail if isinstance(detail, str) and detail.strip() else message,
+        }
     return JSONResponse(
         status_code=exc.status_code,
-        content={"error": message, "detail": message},
+        content=content,
         headers=getattr(exc, "headers", None),
     )
 
@@ -116,6 +128,9 @@ app.include_router(feedback.router)
 app.include_router(auth.router)
 app.include_router(mentor.router)
 app.include_router(evaluate.router)
+app.include_router(calendar.router)
+app.include_router(health.router)
+app.include_router(stats.router)
 
 
 @app.get("/", tags=["health"])

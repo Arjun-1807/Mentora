@@ -4,46 +4,28 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
-import { PageShell } from "@/components/PageShell";
+import { Loader2 } from "lucide-react";
+import AuthSplitLayout from "@/components/layout/AuthSplitLayout";
 import { InlineError } from "@/components/StateCard";
-import { HoverCard } from "@/components/motion";
-import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-  CardContent,
-} from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Loader2 } from "lucide-react";
-import { login, tokenFromAuthResponse } from "@/lib/api";
-import { setToken, setUserRole } from "@/lib/storage";
+import { login, startSession } from "@/lib/api";
+import { roleHome } from "@/lib/storage";
+import { isValidEmail } from "@/lib/validation";
 
-/**
- * Reads the `role` claim from a JWT without verifying it — only used to pick
- * a landing page; the backend still verifies the token on every request.
- */
-function roleFromToken(token) {
-  try {
-    const payload = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
-    return JSON.parse(atob(payload))?.role || null;
-  } catch {
-    return null;
-  }
-}
-
-/** Where to land after signing in — honours `?next=` set by the auth guard. */
+/** Where to land after signing in — honours a same-origin `?next=` set by the auth guard. */
 function nextDestination(role) {
   try {
     const next = new URLSearchParams(window.location.search).get("next");
-    // Only allow same-origin paths.
-    if (next && next.startsWith("/") && !next.startsWith("//")) return next;
+    if (next && next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/login")) {
+      return next;
+    }
   } catch {
     // ignore
   }
-  return role === "mentor" ? "/mentor/dashboard" : "/upload";
+  return roleHome(role);
 }
 
 export default function LoginPage() {
@@ -52,24 +34,27 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [fieldErrors, setFieldErrors] = useState({});
 
   async function handleSubmit(e) {
     e.preventDefault();
     if (loading) return;
 
+    const errors = {};
+    if (!email.trim()) errors.email = "Enter your email address.";
+    else if (!isValidEmail(email)) errors.email = "Enter a valid email address.";
+    if (!password) errors.password = "Enter your password.";
+    setFieldErrors(errors);
+    if (Object.keys(errors).length > 0) return;
+
     setLoading(true);
     setError("");
     try {
-      const data = await login(email, password);
-      const token = tokenFromAuthResponse(data);
-      if (!token) {
-        throw new Error("Signed in, but no session token came back. Try again.");
-      }
-      setToken(token);
-      const role = roleFromToken(token);
-      if (role) setUserRole(role);
+      const data = await login(email.trim(), password);
+      const session = await startSession(data, { email: email.trim() });
+      if (!session) throw new Error("Signed in, but no session token came back. Try again.");
       toast.success("Signed in.");
-      router.push(nextDestination(roleFromToken(token)));
+      router.push(nextDestination(session.role));
     } catch (err) {
       setError(err.message || "Could not sign in.");
       setLoading(false);
@@ -77,60 +62,77 @@ export default function LoginPage() {
   }
 
   return (
-    <PageShell width="md" center>
-      <HoverCard>
-        <Card>
-          <CardHeader>
-            <CardTitle>Sign in</CardTitle>
-            <CardDescription>
-              Welcome back. Sign in to continue to Mentora.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="space-y-1.5">
-                <Label htmlFor="login-email">Email</Label>
-                <Input
-                  id="login-email"
-                  name="email"
-                  type="email"
-                  autoComplete="email"
-                  required
-                  disabled={loading}
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="login-password">Password</Label>
-                <Input
-                  id="login-password"
-                  name="password"
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                  disabled={loading}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
-              </div>
+    <AuthSplitLayout>
+      <Card className="shadow-xl shadow-black/20">
+        <CardHeader>
+          <CardTitle className="text-xl font-semibold">Welcome back</CardTitle>
+          <CardDescription>Sign in to continue to Mentora.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleSubmit} noValidate className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="login-email">Email</Label>
+              <Input
+                id="login-email"
+                name="email"
+                type="email"
+                autoComplete="email"
+                className="h-10"
+                placeholder="you@company.com"
+                disabled={loading}
+                value={email}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  setFieldErrors((p) => ({ ...p, email: undefined }));
+                }}
+                aria-invalid={Boolean(fieldErrors.email) || undefined}
+                aria-describedby={fieldErrors.email ? "login-email-error" : undefined}
+              />
+              {fieldErrors.email && (
+                <p id="login-email-error" role="alert" className="text-xs text-destructive">
+                  {fieldErrors.email}
+                </p>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="login-password">Password</Label>
+              <Input
+                id="login-password"
+                name="password"
+                type="password"
+                autoComplete="current-password"
+                className="h-10"
+                disabled={loading}
+                value={password}
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  setFieldErrors((p) => ({ ...p, password: undefined }));
+                }}
+                aria-invalid={Boolean(fieldErrors.password) || undefined}
+                aria-describedby={fieldErrors.password ? "login-password-error" : undefined}
+              />
+              {fieldErrors.password && (
+                <p id="login-password-error" role="alert" className="text-xs text-destructive">
+                  {fieldErrors.password}
+                </p>
+              )}
+            </div>
 
-              {error && <InlineError message={error} />}
+            {error && <InlineError message={error} className="rounded-lg" />}
 
-              <Button type="submit" className="w-full" disabled={loading}>
-                {loading && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
-                {loading ? "Signing in…" : "Sign In"}
-              </Button>
-            </form>
-            <p className="mt-6 text-center text-sm text-muted-foreground">
-              Don&apos;t have an account?{" "}
-              <Link href="/register" className="text-primary hover:underline">
-                Register
-              </Link>
-            </p>
-          </CardContent>
-        </Card>
-      </HoverCard>
-    </PageShell>
+            <Button type="submit" className="h-10 w-full" disabled={loading}>
+              {loading && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+              {loading ? "Signing in…" : "Sign In"}
+            </Button>
+          </form>
+          <p className="mt-6 text-center text-sm text-muted-foreground">
+            Don&apos;t have an account?{" "}
+            <Link href="/register" className="font-medium text-primary hover:underline">
+              Create one
+            </Link>
+          </p>
+        </CardContent>
+      </Card>
+    </AuthSplitLayout>
   );
 }

@@ -111,7 +111,7 @@ def test_extract_does_not_retry_a_valid_response(monkeypatch):
 def test_email_missing_api_key_is_503(monkeypatch):
     monkeypatch.setattr(email_gen.settings, "GROQ_API_KEY", "")
     with pytest.raises(HTTPException) as exc_info:
-        email_gen.generate_intro_email(PROFILE, MENTOR)
+        email_gen.generate_intro_email(PROFILE, MENTOR, "Founder")
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "Email generation unavailable. Please try again."
 
@@ -126,14 +126,14 @@ def test_email_groq_error_is_503(monkeypatch):
 
     monkeypatch.setattr(email_gen, "_get_client", lambda: Exploding())
     with pytest.raises(HTTPException) as exc_info:
-        email_gen.generate_intro_email(PROFILE, MENTOR)
+        email_gen.generate_intro_email(PROFILE, MENTOR, "Founder")
     assert exc_info.value.status_code == 503
 
 
 def test_email_unparseable_after_retry_is_503(monkeypatch):
     monkeypatch.setattr(email_gen, "_call_groq", lambda *_: "not json")
     with pytest.raises(HTTPException) as exc_info:
-        email_gen.generate_intro_email(PROFILE, MENTOR)
+        email_gen.generate_intro_email(PROFILE, MENTOR, "Founder")
     assert exc_info.value.status_code == 503
 
 

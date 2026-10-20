@@ -1,6 +1,13 @@
 // Single source of truth for all backend API calls.
 import { toast } from "sonner";
-import { clearToken, getToken } from "@/lib/storage";
+import {
+  clearToken,
+  getToken,
+  roleFromToken,
+  setToken,
+  setUserEmail,
+  setUserRole,
+} from "@/lib/storage";
 
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
@@ -273,7 +280,7 @@ export function login(email, password) {
   });
 }
 
-/** Registers a new user (startup or mentor), returns a JWT. */
+/** Registers a new user (startup, mentor or coordinator), returns a JWT. */
 export function register(payload) {
   return request("/register", {
     method: "POST",
@@ -286,6 +293,34 @@ export function register(payload) {
 /** Pulls the JWT out of whichever field the backend used. */
 export function tokenFromAuthResponse(data) {
   return data?.access_token || data?.token || data?.jwt || null;
+}
+
+/**
+ * Persists a fresh login/register response: `token`, `userRole` and
+ * `userEmail` in localStorage. The role comes from the JWT's `role` claim,
+ * then `fallbackRole`, then GET /me. Resolves to `{token, role}`, or `null`
+ * when the response carried no token.
+ */
+export async function startSession(data, { email, fallbackRole } = {}) {
+  const token = tokenFromAuthResponse(data);
+  if (!token) return null;
+  let role = roleFromToken(token) || fallbackRole || null;
+  if (email) setUserEmail(email);
+  if (role) setUserRole(role);
+  // Written last: it fires the auth-change event, and listeners (navbar)
+  // should already see the role/email.
+  setToken(token);
+  if (!role) {
+    try {
+      const me = await getMe();
+      role = me?.role || null;
+      if (role) setUserRole(role);
+      if (me?.email) setUserEmail(me.email);
+    } catch {
+      // Not fatal: the caller falls back to the startup home.
+    }
+  }
+  return { token, role };
 }
 
 /**
@@ -306,4 +341,116 @@ export function updateMentorMatchStatus(matchId, status) {
     method: "PATCH",
     body: { status },
   });
+}
+
+/* ------------------------------------------------------------- dashboards */
+
+/** Startup dashboard counters: `{total_matches, emails_sent, meetings_accepted, avg_rating}`. */
+export function getDashboardStats() {
+  return request("/dashboard/stats", { method: "GET" });
+}
+
+/** Mentor dashboard counters: `{pending_requests, accepted, avg_rating, total_helped}`. */
+export function getMentorStats() {
+  return request("/mentor/stats", { method: "GET" });
+}
+
+/* -------------------------------------------------------- google calendar */
+
+/** Returns `{auth_url}` — send the browser there to start Google OAuth. */
+export function getCalendarAuthUrl() {
+  return request("/calendar/auth-url", { method: "GET" });
+}
+
+/**
+ * Completes Google OAuth with the `code` + `state` Google appended to the
+ * redirect URL. No auth header needed (the state ties it to the user).
+ * Resolves to `{success: true, role}`.
+ */
+export function submitCalendarCallback(code, state) {
+  return request("/calendar/callback", {
+    method: "POST",
+    body: { code, state },
+    skipAuth: true,
+    redirectOn401: false,
+  });
+}
+
+/** `{connected: bool}` for the signed-in user. */
+export function getCalendarStatus() {
+  return request("/calendar/status", { method: "GET" });
+}
+
+/**
+ * Saves the mentor's weekly availability.
+ * `slots` = `[{day: "Monday".."Sunday", start_time: "HH:MM", end_time: "HH:MM"}]`.
+ */
+export function saveCalendarSlots(slots) {
+  return request("/calendar/slots", { method: "POST", body: { slots } });
+}
+
+/** A mentor's weekly availability (`{slots: [...]}`); `mentorId` is the mentors-collection id. */
+export function getMentorSlots(mentorId) {
+  return request(`/calendar/slots/${encodeURIComponent(mentorId)}`, {
+    method: "GET",
+    skipAuth: true,
+  });
+}
+
+/**
+ * Books a Google Calendar meeting with a mentor (startup only).
+ * `match_id` is the uuid `match_id` from /match, `slot` = `{date, start_time, end_time}`.
+ * Resolves to `{success, event_id, meet_link, html_link, title, start, end}`.
+ *
+ * When either side hasn't connected Google Calendar the backend answers 403
+ * with `{error: "calendar_not_connected", user: "startup"|"mentor"}`; that
+ * body is on the thrown `ApiError.payload`, and `err.code`/`err.user` are set
+ * as shortcuts so callers can branch without digging.
+ */
+export async function bookMeeting({ mentor_id, match_id, slot, description }) {
+  try {
+    return await request("/calendar/book", {
+      method: "POST",
+      body: { mentor_id, match_id, slot, description: description ?? "" },
+    });
+  } catch (err) {
+    if (err instanceof ApiError && err.payload && typeof err.payload === "object") {
+      err.code = err.payload.error ?? null;
+      err.user = err.payload.user ?? null;
+    }
+    throw err;
+  }
+}
+
+/** True when an error from `bookMeeting` means a calendar isn't connected. */
+export function isCalendarNotConnected(err) {
+  return (
+    err instanceof ApiError &&
+    err.status === 403 &&
+    (err.payload?.error === "calendar_not_connected" || err.code === "calendar_not_connected")
+  );
+}
+
+/* ----------------------------------------------------------- health score */
+
+/**
+ * Logs a post-meeting outcome:
+ * `{match_id, momentum_score: 1-5, blockers_resolved: bool, mentor_engagement: 1-5, notes?}`.
+ * Resolves to `{health_score, trend}`.
+ */
+export function logHealth(payload) {
+  return request("/health/log", { method: "POST", body: payload });
+}
+
+/**
+ * Health score for a startup (`"me"` = the caller):
+ * `{health_score|null, trend, health_history: [{score, timestamp}], last_updated|null}`.
+ */
+export function getHealth(startupId = "me") {
+  return request(`/health/${encodeURIComponent(startupId || "me")}`, { method: "GET" });
+}
+
+/** Coordinator view of every startup's health: `{startups: [...]}`. */
+export function getCohortHealth() {
+  return request("/health/cohort", { method: "GET" });
 }

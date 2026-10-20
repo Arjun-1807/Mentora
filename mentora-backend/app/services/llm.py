@@ -1,7 +1,8 @@
 """
 Groq LLM integration: sends extracted pitch-deck/startup text to Groq
 (model configurable via GROQ_MODEL) and parses the response into a
-StartupProfile.
+StartupProfile, then (second call) asks for `deck_feedback` on how useful
+that profile is for mentor matching.
 """
 import json
 import logging
@@ -12,7 +13,7 @@ from groq import Groq
 from pydantic import ValidationError
 
 from app.config import settings
-from app.models.schemas import StartupProfile
+from app.models.schemas import DeckFeedback, StartupProfile
 
 logger = logging.getLogger(__name__)
 
@@ -145,3 +146,86 @@ def extract_startup_profile(text: str) -> StartupProfile:
         raise HTTPException(status_code=500, detail=UNPARSEABLE_PROFILE_MESSAGE)
 
     return profile
+
+
+# --- Deck feedback (second Groq call made by POST /extract) ------------------
+
+FEEDBACK_SYSTEM_PROMPT = (
+    "You are an expert startup analyst who evaluates how useful a startup "
+    "profile is for mentor matching. Return ONLY a single valid JSON object."
+)
+
+FEEDBACK_PROMPT_TEMPLATE = """
+Analyze this startup profile extracted from a pitch deck for mentor matching quality.
+Profile: {profile_json}
+
+Return ONLY valid JSON, no markdown, no explanation:
+{{
+  "confidence_score": <integer 0-100>,
+  "strong_signals": [<string>, ...],
+  "weak_signals": [<string>, ...],
+  "improvement_tips": [<string max 3>, ...]
+}}
+
+confidence_score: how well a mentor could assess fit from this profile (0=nothing useful, 100=very detailed).
+strong_signals: specific things that are clear (e.g. "Domain clearly identified as Clean Energy").
+weak_signals: vague or missing info (e.g. "Team gaps not mentioned").
+improvement_tips: specific actionable suggestions to improve mentor matching quality.
+"""
+
+
+def build_feedback_prompt(profile: StartupProfile) -> str:
+    return FEEDBACK_PROMPT_TEMPLATE.format(profile_json=json.dumps(profile.model_dump()))
+
+
+def _call_groq_feedback(prompt: str) -> str:
+    """Single Groq call for deck feedback (JSON mode). Raises HTTPException
+    on any failure, exactly like `_call_groq`; the caller falls back."""
+    client = _get_client()
+    try:
+        completion = client.chat.completions.create(
+            model=settings.GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": FEEDBACK_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        content = completion.choices[0].message.content
+    except Exception as exc:
+        logger.warning("Groq deck-feedback call failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Deck feedback is unavailable.") from exc
+    if not content:
+        raise HTTPException(status_code=502, detail="Groq API returned an empty response.")
+    return content
+
+
+def _load_json_object(raw_content: str) -> dict:
+    try:
+        data = json.loads(raw_content)
+    except json.JSONDecodeError:
+        cleaned = raw_content.strip().strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+        data = json.loads(cleaned)
+    if not isinstance(data, dict):
+        raise ValueError("deck feedback must be a JSON object")
+    return data
+
+
+def generate_deck_feedback(profile: StartupProfile) -> DeckFeedback:
+    """Ask Groq how useful `profile` is for mentor matching.
+
+    Never raises: any failure (missing key, Groq error, malformed JSON,
+    schema violation) is logged as a warning and the neutral default
+    (confidence 60, empty lists) is returned, so /extract never fails
+    because of feedback.
+    """
+    try:
+        raw_content = _call_groq_feedback(build_feedback_prompt(profile))
+        return DeckFeedback.model_validate(_load_json_object(raw_content))
+    except Exception as exc:
+        detail = getattr(exc, "detail", None) or str(exc)
+        logger.warning("Deck feedback unavailable, using the default: %s", str(detail)[:300])
+        return DeckFeedback.default()

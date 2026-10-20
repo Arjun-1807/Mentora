@@ -1,70 +1,122 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { AnimatePresence, motion } from "framer-motion";
 import { toast } from "sonner";
+import {
+  ArrowRight,
+  CalendarCheck,
+  CalendarDays,
+  CheckCircle2,
+  History,
+  Inbox,
+  LayoutDashboard,
+  Loader2,
+  RefreshCw,
+  Star,
+  TrendingUp,
+  UserCircle,
+  Users,
+} from "lucide-react";
 import AuthGuard from "@/components/AuthGuard";
-import { PageShell, PageHeader } from "@/components/PageShell";
+import StatCard from "@/components/ui/StatCard";
+import StatusBadge from "@/components/ui/StatusBadge";
+import MentorCard from "@/components/ui/MentorCard";
 import { StateCard, InlineError } from "@/components/StateCard";
-import { CountUp, HoverCard } from "@/components/motion";
-import { Card, CardHeader, CardTitle, CardContent, CardDescription } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
-  TableHeader,
   TableBody,
-  TableRow,
-  TableHead,
   TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
 } from "@/components/ui/table";
-import { Loader2, Users, CalendarCheck, Star, TrendingUp, Inbox, UserCircle } from "lucide-react";
-import { getMentorMatches, updateMentorMatchStatus } from "@/lib/api";
+import DashboardShell, { useTabParam } from "@/components/dashboard/DashboardShell";
+import HealthLogDialog from "@/components/dashboard/HealthLogDialog";
+import PostMeetingBanner from "@/components/dashboard/PostMeetingBanner";
+import AvailabilityGrid from "@/components/dashboard/AvailabilityGrid";
+import { CalendarStatus } from "@/components/dashboard/CalendarConnect";
+import {
+  dateLabel,
+  initialsOf,
+  sameMatch,
+  statusOf,
+  withHealthLogged,
+} from "@/components/dashboard/helpers";
 import { useAuth } from "@/hooks/use-auth";
+import { isHttpUrl } from "@/lib/validation";
+import { getMentorMatches, getMentorStats, updateMentorMatchStatus } from "@/lib/api";
 
-// ── helpers ─────────────────────────────────────────────────────────────────
+const TABS = [
+  { id: "overview", label: "Overview", icon: LayoutDashboard },
+  { id: "requests", label: "Requests", icon: Inbox },
+  { id: "past", label: "Past Meetings", icon: History },
+  { id: "profile", label: "Profile", icon: UserCircle },
+];
+const TAB_IDS = TABS.map((t) => t.id);
 
-const STATUS_VARIANT = {
-  pending: "secondary",
-  accepted: "default",
-  declined: "destructive",
-  emailed: "outline",
-  email_sent: "outline",
-  completed: "default",
+const TAB_COPY = {
+  overview: { title: "Overview", description: "Your mentoring activity at a glance." },
+  requests: {
+    title: "Requests",
+    description: "Startups Mentora matched with your profile. Accept to let them book time with you.",
+  },
+  past: { title: "Past Meetings", description: "Startups you've accepted and met with." },
+  profile: {
+    title: "Profile",
+    description: "What startups see, your calendar connection and your weekly availability.",
+  },
 };
 
-const STATUS_LABEL = {
-  pending: "Pending",
-  accepted: "Accepted",
-  declined: "Declined",
-  emailed: "Drafted",
-  email_sent: "Intro sent",
-  completed: "Completed",
-};
+/** Must match GET /mentor/stats `pending_requests` (see CONTRACT). */
+const REQUEST_STATUSES = "pending,emailed,email_sent";
+const REQUEST_SET = new Set(REQUEST_STATUSES.split(","));
+const PAST_SET = new Set(["accepted", "meeting_scheduled", "completed"]);
 
-function scorePercent(score) {
-  if (typeof score !== "number" || Number.isNaN(score)) return null;
-  return Math.round(Math.max(0, Math.min(100, score <= 1 ? score * 100 : score)));
+function matchKey(match) {
+  return match?._id || match?.match_id;
 }
 
-function timestampLabel(value) {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleDateString(undefined, { dateStyle: "medium" });
+function startupName(match) {
+  return match?.startup_profile?.domain || match?.startup_email || "this startup";
 }
 
-// Star display (read-only)
+function ratingOf(match) {
+  const r = [match?.rating, match?.feedback?.rating, match?.effectiveness_score].find(
+    (v) => typeof v === "number" && v > 0
+  );
+  return typeof r === "number" ? Math.round(r) : null;
+}
+
+/** Client-side stand-in for GET /mentor/stats if that endpoint fails. */
+function fallbackStats(matches) {
+  const ratings = matches.map(ratingOf).filter((r) => r !== null);
+  const helped = new Set(
+    matches
+      .filter((m) => ["meeting_scheduled", "completed"].includes(statusOf(m)))
+      .map((m) => m.user_id || m.startup_email || matchKey(m))
+  );
+  return {
+    pending_requests: matches.filter((m) => REQUEST_SET.has(statusOf(m))).length,
+    accepted: matches.filter((m) => PAST_SET.has(statusOf(m))).length,
+    avg_rating: ratings.length ? ratings.reduce((a, b) => a + b, 0) / ratings.length : null,
+    total_helped: helped.size,
+  };
+}
+
 function StarDisplay({ rating }) {
-  if (!rating) return <span className="text-muted-foreground text-xs">—</span>;
+  if (!rating) return <span className="text-xs text-muted-foreground">—</span>;
   return (
-    <span className="flex items-center gap-0.5" aria-label={`${rating} out of 5 stars`}>
+    <span className="flex items-center gap-0.5" role="img" aria-label={`${rating} out of 5 stars`}>
       {Array.from({ length: 5 }).map((_, i) => (
         <Star
           key={i}
-          className={`h-3 w-3 ${i < rating ? "fill-yellow-400 text-yellow-400" : "text-muted-foreground"}`}
+          className={`h-3.5 w-3.5 ${i < rating ? "fill-primary text-primary" : "text-muted-foreground"}`}
           aria-hidden="true"
         />
       ))}
@@ -72,425 +124,540 @@ function StarDisplay({ rating }) {
   );
 }
 
-// ── Stat Card ────────────────────────────────────────────────────────────────
-
-function StatCard({ label, value, icon: Icon, hint, loading }) {
+function ListSkeleton({ rows = 3, className = "h-24" }) {
   return (
-    <HoverCard>
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between pb-2">
-          <CardTitle className="text-xs uppercase tracking-wide text-muted-foreground">
-            {label}
-          </CardTitle>
-          {Icon && <Icon className="h-4 w-4 text-muted-foreground" aria-hidden="true" />}
-        </CardHeader>
-        <CardContent>
-          {loading ? (
-            <Skeleton className="h-8 w-16" />
-          ) : (
-            <>
-              <p className="text-3xl font-bold text-foreground tabular-nums">
-                {typeof value === "number" ? <CountUp value={value} decimals={value % 1 !== 0 ? 1 : 0} /> : value}
-              </p>
-              {hint && <p className="mt-1 text-xs text-muted-foreground">{hint}</p>}
-            </>
-          )}
-        </CardContent>
-      </Card>
-    </HoverCard>
+    <div className="space-y-3">
+      {Array.from({ length: rows }).map((_, i) => (
+        <Skeleton key={i} className={`${className} w-full`} />
+      ))}
+    </div>
   );
 }
 
-// ── Match Request Card ───────────────────────────────────────────────────────
+/* ------------------------------------------------------------- profile tab */
 
-function MatchRequestCard({ match, onAction }) {
-  const [acting, setActing] = useState(null); // "accepted" | "declined" | null
-  const profile = match.startup_profile || {};
-  const challenges = Array.isArray(profile.challenges) ? profile.challenges.slice(0, 3) : [];
-  const score = scorePercent(match.score ?? match.match_score);
-  const status = (match.status || "pending").toLowerCase();
-  const isDone = status === "accepted" || status === "declined";
-
-  async function handleAction(newStatus) {
-    if (acting || isDone) return;
-    setActing(newStatus);
-    try {
-      await updateMentorMatchStatus(match._id || match.match_id, newStatus);
-      toast.success(newStatus === "accepted" ? "Request accepted!" : "Request declined.");
-      onAction(match._id || match.match_id, newStatus);
-    } catch (err) {
-      toast.error(err.message || "Could not update this request.");
-    } finally {
-      setActing(null);
-    }
-  }
-
+function ProfileField({ label, children }) {
   return (
-    <HoverCard>
-      <Card>
-        <CardHeader>
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <CardTitle className="text-base">
-                {profile.domain || "Unknown domain"}
-              </CardTitle>
-              <div className="mt-1 flex flex-wrap items-center gap-2">
-                {profile.stage && (
-                  <Badge variant="secondary">{profile.stage} stage</Badge>
-                )}
-                <Badge variant={STATUS_VARIANT[status] || "secondary"}>
-                  {STATUS_LABEL[status] || status}
-                </Badge>
-              </div>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {challenges.length > 0 && (
-            <ul className="list-disc list-inside text-sm text-muted-foreground space-y-0.5">
-              {challenges.map((c, i) => (
-                <li key={i} className="truncate">{c}</li>
-              ))}
-            </ul>
-          )}
-
-          {score !== null && (
-            <div>
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                  Match Score
-                </span>
-                <span className="text-sm font-semibold text-primary tabular-nums">
-                  {score}%
-                </span>
-              </div>
-              <Progress value={score} aria-label={`Match score ${score}%`} />
-            </div>
-          )}
-
-          {!isDone && (
-            <div className="flex items-center gap-2 pt-1">
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => handleAction("accepted")}
-                disabled={!!acting}
-              >
-                {acting === "accepted" && <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />}
-                Accept
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="border-destructive text-destructive hover:bg-destructive/10"
-                onClick={() => handleAction("declined")}
-                disabled={!!acting}
-              >
-                {acting === "declined" && <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />}
-                Decline
-              </Button>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-    </HoverCard>
+    <div>
+      <dt className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">{label}</dt>
+      <dd className="text-sm">{children}</dd>
+    </div>
   );
 }
-
-// ── Profile Summary Card ─────────────────────────────────────────────────────
 
 function ProfileSummaryCard({ user }) {
   const profile = user?.profile || {};
   const name = profile.name || user?.email || "Mentor";
   const sectors = Array.isArray(profile.sector_expertise) ? profile.sector_expertise : [];
-  const stage = profile.stage_focus || profile.stageFocus;
-  const geography = profile.geography;
-  const availability = profile.availability;
+  const rawStages = profile.preferred_stages ?? profile.stage_focus ?? profile.stageFocus;
+  const stages = Array.isArray(rawStages) ? rawStages : rawStages ? [rawStages] : [];
+  const linkedin = isHttpUrl(profile.linkedin_url) ? profile.linkedin_url : null;
 
   return (
-    <HoverCard>
-      <Card className="h-full">
-        <CardHeader>
-          <div className="flex items-center gap-3">
-            <div className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary font-bold text-lg">
-              {name.charAt(0).toUpperCase()}
-            </div>
-            <div className="min-w-0">
-              <CardTitle className="text-base truncate">{name}</CardTitle>
-              {user?.email && (
-                <p className="text-xs text-muted-foreground truncate">{user.email}</p>
-              )}
-            </div>
+    <Card>
+      <CardHeader className="flex flex-row items-start justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <span
+            aria-hidden="true"
+            className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-primary text-base font-bold text-primary-foreground"
+          >
+            {initialsOf(name)}
+          </span>
+          <div className="min-w-0">
+            <CardTitle className="truncate text-base">{name}</CardTitle>
+            {user?.email && <p className="truncate text-xs text-muted-foreground">{user.email}</p>}
           </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
+        </div>
+        <Button size="sm" variant="outline" render={<Link href="/onboarding/mentor" />}>
+          <UserCircle aria-hidden="true" />
+          Edit Profile
+        </Button>
+      </CardHeader>
+      <CardContent>
+        <dl className="grid gap-4 sm:grid-cols-2">
+          {profile.bio && (
+            <div className="sm:col-span-2">
+              <dt className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Bio</dt>
+              <dd className="text-sm leading-relaxed text-muted-foreground">{profile.bio}</dd>
+            </div>
+          )}
           {sectors.length > 0 && (
-            <div>
-              <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1.5">Expertise</p>
-              <div className="flex flex-wrap gap-1.5">
+            <ProfileField label="Expertise">
+              <span className="flex flex-wrap gap-1.5">
                 {sectors.map((s) => (
-                  <Badge key={s} variant="outline" className="text-xs">{s}</Badge>
+                  <Badge key={s} variant="outline">
+                    {s === "Others" ? "Other" : s}
+                  </Badge>
                 ))}
-              </div>
-            </div>
+              </span>
+            </ProfileField>
           )}
-          {stage && (
-            <div>
-              <p className="text-xs uppercase tracking-wide text-muted-foreground mb-0.5">Stage focus</p>
-              <p className="text-sm">{stage === "all" ? "All stages" : `${stage} stage`}</p>
-            </div>
+          {stages.length > 0 && (
+            <ProfileField label="Stage focus">
+              <span className="capitalize">
+                {stages.map((s) => (s === "all" ? "All stages" : s)).join(", ")}
+              </span>
+            </ProfileField>
           )}
-          {geography && (
-            <div>
-              <p className="text-xs uppercase tracking-wide text-muted-foreground mb-0.5">Geography</p>
-              <p className="text-sm">{geography}</p>
-            </div>
+          {profile.geography && <ProfileField label="Geography">{profile.geography}</ProfileField>}
+          {profile.availability && <ProfileField label="Availability">{profile.availability}</ProfileField>}
+          {(profile.years_experience || profile.experience) && (
+            <ProfileField label="Experience">{profile.years_experience || profile.experience} years</ProfileField>
           )}
-          {availability && (
-            <div>
-              <p className="text-xs uppercase tracking-wide text-muted-foreground mb-0.5">Availability</p>
-              <p className="text-sm">{availability}</p>
-            </div>
+          {profile.max_startups_per_month && (
+            <ProfileField label="Startups per month">{profile.max_startups_per_month}</ProfileField>
           )}
-          <div className="pt-2">
-            <Button size="sm" variant="outline" className="w-full" render={<Link href="/onboarding/mentor" />}>
-              <UserCircle className="h-4 w-4" aria-hidden="true" />
-              Edit Profile
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-    </HoverCard>
+          {profile.past_exits && <ProfileField label="Past exits">{profile.past_exits}</ProfileField>}
+          {linkedin && (
+            <ProfileField label="LinkedIn">
+              <a
+                href={linkedin}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="break-all text-primary underline-offset-4 hover:underline"
+              >
+                {linkedin}
+              </a>
+            </ProfileField>
+          )}
+        </dl>
+        {sectors.length === 0 && !profile.bio && (
+          <p className="text-sm text-muted-foreground">
+            Your profile is mostly empty. Complete it so Mentora can match you with the right startups.
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
-// ── Main content ─────────────────────────────────────────────────────────────
+function ProfileTab({ user }) {
+  if (!user) return <ListSkeleton rows={2} className="h-40" />;
+  return (
+    <div className="space-y-6">
+      <ProfileSummaryCard user={user} />
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <CalendarDays className="h-4 w-4 text-primary" aria-hidden="true" />
+            Google Calendar
+          </CardTitle>
+          <CardDescription>
+            Startups can only book a meeting with you once your calendar is connected. Events are
+            created with a Google Meet link.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <CalendarStatus initial={user.calendar_connected} />
+        </CardContent>
+      </Card>
+      <AvailabilityGrid mentorId={user.mentor_id} />
+    </div>
+  );
+}
 
-function MentorDashboardContent() {
+/* ------------------------------------------------------------------- page */
+
+function MentorDashboard() {
+  const [tab, setTab] = useTabParam(TAB_IDS);
   const { user } = useAuth();
+
+  const [requests, setRequests] = useState([]);
+  const [requestsLoading, setRequestsLoading] = useState(true);
+  const [requestsError, setRequestsError] = useState("");
   const [allMatches, setAllMatches] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [allLoading, setAllLoading] = useState(true);
+  const [allError, setAllError] = useState("");
+  const [apiStats, setApiStats] = useState(null);
+  const [statsFailed, setStatsFailed] = useState(false);
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [busy, setBusy] = useState({});
   const [reloadKey, setReloadKey] = useState(0);
+  const [healthMatch, setHealthMatch] = useState(null);
+  const [healthOpen, setHealthOpen] = useState(false);
+
+  const loadStats = useCallback(() => {
+    let cancelled = false;
+    setStatsLoading(true);
+    getMentorStats()
+      .then((data) => {
+        if (cancelled) return;
+        setApiStats(data || null);
+        setStatsFailed(false);
+      })
+      .catch(() => {
+        if (!cancelled) setStatsFailed(true);
+      })
+      .finally(() => {
+        if (!cancelled) setStatsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError("");
+    const toList = (data) => (Array.isArray(data) ? data : data?.matches || []);
 
-    getMentorMatches()
+    setRequestsLoading(true);
+    setRequestsError("");
+    getMentorMatches({ status: REQUEST_STATUSES })
       .then((data) => {
-        if (cancelled) return;
-        const list = Array.isArray(data) ? data : data?.matches || [];
-        setAllMatches(list);
+        if (!cancelled) setRequests(toList(data));
       })
       .catch((err) => {
-        if (cancelled) return;
-        setError(err.message || "Could not load your match requests.");
+        if (!cancelled) setRequestsError(err.message || "Could not load your match requests.");
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setRequestsLoading(false);
       });
 
-    return () => { cancelled = true; };
-  }, [reloadKey]);
+    setAllLoading(true);
+    setAllError("");
+    getMentorMatches()
+      .then((data) => {
+        if (!cancelled) setAllMatches(toList(data));
+      })
+      .catch((err) => {
+        if (!cancelled) setAllError(err.message || "Could not load your meetings.");
+      })
+      .finally(() => {
+        if (!cancelled) setAllLoading(false);
+      });
 
-  // Update a match's status inline without page reload
-  const handleMatchAction = useCallback((matchId, newStatus) => {
-    setAllMatches((prev) =>
-      prev.map((m) =>
-        (m._id === matchId || m.match_id === matchId)
-          ? { ...m, status: newStatus }
-          : m
-      )
-    );
-  }, []);
+    const cancelStats = loadStats();
+    return () => {
+      cancelled = true;
+      cancelStats();
+    };
+  }, [reloadKey, loadStats]);
 
-  // Derived stats
-  const stats = useMemo(() => {
-    const pending = allMatches.filter((m) => (m.status || "pending") === "pending").length;
-    const accepted = allMatches.filter((m) => m.attended === true || m.status === "accepted").length;
-
-    const ratings = allMatches
-      .map((m) => m.effectiveness_score ?? m.rating)
-      .filter((r) => typeof r === "number" && r > 0);
-    const avgRating =
-      ratings.length > 0
-        ? Math.round((ratings.reduce((a, b) => a + b, 0) / ratings.length) * 10) / 10
-        : null;
-
-    const total = allMatches.length;
-
-    return [
-      { label: "Pending Requests", value: pending, icon: Inbox, hint: "Awaiting your response" },
-      { label: "Meetings Accepted", value: accepted, icon: CalendarCheck, hint: "You accepted these" },
-      {
-        label: "Avg Rating",
-        value: avgRating ?? "—",
-        icon: Star,
-        hint: avgRating !== null ? "Out of 5" : "No ratings yet",
-      },
-      { label: "Total Startups Helped", value: total, icon: TrendingUp, hint: "All-time matches" },
-    ];
-  }, [allMatches]);
-
-  // Pending requests (those awaiting a response)
-  const pendingRequests = allMatches.filter((m) => (m.status || "pending") === "pending");
-
-  // Past meetings (accepted / beyond)
-  const pastMeetings = allMatches.filter((m) =>
-    ["accepted", "met", "rated", "completed", "email_sent"].includes(m.status)
+  const stats = useMemo(
+    () => (statsFailed ? fallbackStats(allMatches) : apiStats),
+    [statsFailed, apiStats, allMatches]
   );
 
+  const pastMeetings = useMemo(
+    () =>
+      allMatches
+        .filter((m) => PAST_SET.has(statusOf(m)))
+        .sort((a, b) => {
+          const t = (m) => new Date(m.meeting?.date || m.updated_at || m.timestamp || 0).getTime() || 0;
+          return t(b) - t(a);
+        }),
+    [allMatches]
+  );
+
+  /** Accept/decline with optimistic removal; restores the card on failure. */
+  const respond = useCallback(
+    async (match, decision) => {
+      const key = matchKey(match);
+      if (!key || busy[key]) return;
+      const index = requests.findIndex((m) => matchKey(m) === key);
+
+      setBusy((b) => ({ ...b, [key]: decision === "accepted" ? "accept" : "decline" }));
+      setRequests((prev) => prev.filter((m) => matchKey(m) !== key));
+      try {
+        // PATCH /mentor/matches/{id} takes the Mongo `_id` of the match doc.
+        await updateMentorMatchStatus(key, decision);
+        toast.success(
+          decision === "accepted"
+            ? `Accepted ${startupName(match)}. They can now book a meeting with you.`
+            : `Declined ${startupName(match)}.`
+        );
+        setAllMatches((prev) => prev.map((m) => (matchKey(m) === key ? { ...m, status: decision } : m)));
+        loadStats();
+      } catch (err) {
+        setRequests((prev) => {
+          if (prev.some((m) => matchKey(m) === key)) return prev;
+          const next = [...prev];
+          next.splice(Math.max(0, Math.min(index, next.length)), 0, match);
+          return next;
+        });
+        if (err?.status !== 0) toast.error(err.message || "Could not update this request.");
+      } finally {
+        setBusy((b) => {
+          const next = { ...b };
+          delete next[key];
+          return next;
+        });
+      }
+    },
+    [busy, requests, loadStats]
+  );
+
+  const handleHealthLogged = useCallback(
+    (match) => {
+      setAllMatches((prev) => prev.map((m) => (sameMatch(m, match) ? withHealthLogged(m, "mentor") : m)));
+      loadStats();
+    },
+    [loadStats]
+  );
+
+  const avg = typeof stats?.avg_rating === "number" ? Math.round(stats.avg_rating * 10) / 10 : null;
+  const pendingCount = requestsLoading ? stats?.pending_requests : requests.length;
+  const navItems = TABS.map((t) => (t.id === "requests" ? { ...t, badge: pendingCount } : t));
+  const copy = TAB_COPY[tab];
+  const refreshing = requestsLoading || allLoading || statsLoading;
+
   return (
-    <PageShell width="full">
-      <PageHeader
-        title="Mentor Dashboard"
-        description="Review incoming startup requests and track your mentoring activity."
-        actions={
+    <DashboardShell items={navItems} active={tab} onSelect={setTab} title="Mentor dashboard">
+      <PostMeetingBanner
+        matches={allMatches}
+        role="mentor"
+        nameOf={startupName}
+        onLog={(m) => {
+          setHealthMatch(m);
+          setHealthOpen(true);
+        }}
+      />
+
+      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">{copy.title}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">{copy.description}</p>
+        </div>
+        {tab !== "profile" && (
           <Button
             type="button"
             variant="outline"
             size="sm"
             onClick={() => setReloadKey((k) => k + 1)}
-            disabled={loading}
+            disabled={refreshing}
+            className="self-start sm:self-auto"
           >
-            {loading && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+            {refreshing ? <Loader2 className="animate-spin" aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
             Refresh
           </Button>
-        }
-      />
-
-      {/* Stat Cards */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
-        {stats.map((stat) => (
-          <StatCard key={stat.label} {...stat} loading={loading} />
-        ))}
+        )}
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_280px]">
-        <div className="space-y-8 min-w-0">
-          {/* Incoming Match Requests */}
-          <section>
-            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-              <Inbox className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
-              Incoming Match Requests
-            </h2>
-
-            {loading ? (
-              <div className="space-y-4">
-                {Array.from({ length: 2 }).map((_, i) => (
-                  <Skeleton key={i} className="h-44 w-full" />
-                ))}
+      <AnimatePresence mode="wait" initial={false}>
+        <motion.div
+          key={tab}
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -4 }}
+          transition={{ duration: 0.2 }}
+        >
+          {tab === "overview" && (
+            <div className="space-y-6">
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <StatCard
+                  icon={<Inbox />}
+                  label="Pending Requests"
+                  value={stats?.pending_requests ?? 0}
+                  loading={statsLoading && !stats}
+                />
+                <StatCard
+                  icon={<CalendarCheck />}
+                  label="Accepted"
+                  value={stats?.accepted ?? 0}
+                  loading={statsLoading && !stats}
+                />
+                <StatCard
+                  icon={<Star />}
+                  label="Avg Rating"
+                  value={avg ?? "—"}
+                  trend={avg !== null ? "Out of 5" : "No ratings yet"}
+                  loading={statsLoading && !stats}
+                />
+                <StatCard
+                  icon={<TrendingUp />}
+                  label="Total Helped"
+                  value={stats?.total_helped ?? 0}
+                  trend="Startups you've met"
+                  loading={statsLoading && !stats}
+                />
               </div>
-            ) : error ? (
-              <InlineError message={error}>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setReloadKey((k) => k + 1)}
-                >
+
+              <div className="grid gap-4 lg:grid-cols-2">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Inbox className="h-4 w-4 text-primary" aria-hidden="true" />
+                      Requests waiting
+                    </CardTitle>
+                    <CardDescription>
+                      {requestsLoading
+                        ? "Checking for new requests…"
+                        : requests.length === 0
+                          ? "You're all caught up."
+                          : `${requests.length} startup${requests.length === 1 ? " is" : "s are"} waiting for your answer.`}
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <Button type="button" size="sm" variant="outline" onClick={() => setTab("requests")}>
+                      Review requests
+                      <ArrowRight aria-hidden="true" />
+                    </Button>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <CalendarDays className="h-4 w-4 text-primary" aria-hidden="true" />
+                      Google Calendar
+                    </CardTitle>
+                    <CardDescription>Needed for startups to book time with you.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex flex-wrap items-center gap-3">
+                    <CalendarStatus initial={user?.calendar_connected} size="sm" />
+                    <Button type="button" size="sm" variant="ghost" onClick={() => setTab("profile")}>
+                      Set availability
+                      <ArrowRight aria-hidden="true" />
+                    </Button>
+                  </CardContent>
+                </Card>
+              </div>
+            </div>
+          )}
+
+          {tab === "requests" &&
+            (requestsLoading ? (
+              <ListSkeleton />
+            ) : requestsError ? (
+              <InlineError message={requestsError}>
+                <Button type="button" size="sm" variant="outline" onClick={() => setReloadKey((k) => k + 1)}>
                   Try again
                 </Button>
               </InlineError>
-            ) : pendingRequests.length === 0 ? (
+            ) : requests.length === 0 ? (
               <StateCard
                 icon={Users}
                 title="No pending requests"
                 description="When startups match with your profile, their requests appear here."
-                className="border-0 shadow-none bg-transparent"
               />
             ) : (
-              <div className="grid gap-4 sm:grid-cols-2">
-                {pendingRequests.map((match) => (
-                  <MatchRequestCard
-                    key={match._id || match.match_id}
-                    match={match}
-                    onAction={handleMatchAction}
+              <ul className="space-y-3">
+                {requests.map((match, i) => {
+                  const profile = match.startup_profile || {};
+                  const key = matchKey(match);
+                  return (
+                    <li key={key || i}>
+                      <MentorCard
+                        variant="request"
+                        index={i}
+                        mentor={{
+                          name: profile.domain || match.startup_email || "Startup",
+                          domain: profile.domain,
+                          stage_focus: profile.stage,
+                          expertise: Array.isArray(profile.challenges) ? profile.challenges : [],
+                          email: match.startup_email,
+                        }}
+                        matchScore={match.score ?? match.match_score}
+                        busy={busy[key] || false}
+                        onAccept={() => respond(match, "accepted")}
+                        onDecline={() => respond(match, "declined")}
+                      >
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                          {match.startup_email && <span className="break-all">{match.startup_email}</span>}
+                          <span>Matched {dateLabel(match.timestamp || match.updated_at)}</span>
+                          {Array.isArray(profile.team_gaps) && profile.team_gaps.length > 0 && (
+                            <span>Team gaps: {profile.team_gaps.slice(0, 3).join(", ")}</span>
+                          )}
+                        </div>
+                      </MentorCard>
+                    </li>
+                  );
+                })}
+              </ul>
+            ))}
+
+          {tab === "past" && (
+            <Card>
+              <CardContent>
+                {allLoading ? (
+                  <ListSkeleton rows={4} className="h-10" />
+                ) : allError ? (
+                  <InlineError message={allError}>
+                    <Button type="button" size="sm" variant="outline" onClick={() => setReloadKey((k) => k + 1)}>
+                      Try again
+                    </Button>
+                  </InlineError>
+                ) : pastMeetings.length === 0 ? (
+                  <StateCard
+                    icon={CheckCircle2}
+                    title="No meetings yet"
+                    description="Startups you accept will appear here, along with their meeting and rating."
+                    className="border-0 bg-transparent shadow-none ring-0"
                   />
-                ))}
-              </div>
-            )}
-          </section>
-
-          {/* Past Meetings */}
-          <section>
-            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-              <CalendarCheck className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
-              Past Meetings
-            </h2>
-
-            {loading ? (
-              <div className="space-y-2">
-                {Array.from({ length: 3 }).map((_, i) => (
-                  <Skeleton key={i} className="h-10 w-full" />
-                ))}
-              </div>
-            ) : pastMeetings.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                Accepted matches will appear here once you&apos;ve had meetings.
-              </p>
-            ) : (
-              <HoverCard>
-                <Card>
-                  <CardContent className="p-0">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Startup Domain</TableHead>
-                          <TableHead>Date</TableHead>
-                          <TableHead>Status</TableHead>
-                          <TableHead>Rating</TableHead>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Startup Domain</TableHead>
+                        <TableHead>Date</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Rating</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {pastMeetings.map((match, i) => (
+                        <TableRow key={matchKey(match) || i}>
+                          <TableCell className="max-w-[14rem]">
+                            <span className="block truncate font-medium">
+                              {match.startup_profile?.domain || "Unknown"}
+                            </span>
+                            {match.startup_email && (
+                              <span className="block truncate text-xs text-muted-foreground">
+                                {match.startup_email}
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell className="whitespace-nowrap text-muted-foreground">
+                            {match.meeting?.date
+                              ? `${dateLabel(match.meeting.date)}${match.meeting.start_time ? ` · ${match.meeting.start_time}` : ""}`
+                              : dateLabel(match.updated_at || match.timestamp)}
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge status={statusOf(match)} />
+                          </TableCell>
+                          <TableCell>
+                            <StarDisplay rating={ratingOf(match)} />
+                          </TableCell>
                         </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {pastMeetings.map((match, i) => {
-                          const profile = match.startup_profile || {};
-                          const status = (match.status || "").toLowerCase();
-                          const rating = match.rating ?? match.effectiveness_score ?? null;
-                          return (
-                            <TableRow key={match._id || match.match_id || i}>
-                              <TableCell className="font-medium">
-                                {profile.domain || <span className="text-muted-foreground text-xs">Unknown</span>}
-                              </TableCell>
-                              <TableCell className="text-muted-foreground">
-                                {timestampLabel(match.timestamp || match.updated_at)}
-                              </TableCell>
-                              <TableCell>
-                                <Badge variant={STATUS_VARIANT[status] || "secondary"}>
-                                  {STATUS_LABEL[status] || status}
-                                </Badge>
-                              </TableCell>
-                              <TableCell>
-                                <StarDisplay rating={typeof rating === "number" ? Math.round(rating) : null} />
-                              </TableCell>
-                            </TableRow>
-                          );
-                        })}
-                      </TableBody>
-                    </Table>
-                  </CardContent>
-                </Card>
-              </HoverCard>
-            )}
-          </section>
-        </div>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
-        {/* Profile Summary Sidebar */}
-        <aside>
-          <ProfileSummaryCard user={user} />
-        </aside>
-      </div>
-    </PageShell>
+          {tab === "profile" && <ProfileTab user={user} />}
+        </motion.div>
+      </AnimatePresence>
+
+      <HealthLogDialog
+        open={healthOpen}
+        onOpenChange={setHealthOpen}
+        match={healthMatch}
+        role="mentor"
+        counterpartName={healthMatch ? startupName(healthMatch) : null}
+        onLogged={handleHealthLogged}
+      />
+    </DashboardShell>
+  );
+}
+
+function ShellFallback() {
+  return (
+    <div role="status" aria-live="polite" className="flex flex-1 items-center justify-center py-24 text-muted-foreground">
+      <Loader2 className="h-6 w-6 animate-spin" aria-hidden="true" />
+      <span className="sr-only">Loading dashboard…</span>
+    </div>
   );
 }
 
 export default function MentorDashboardPage() {
   return (
     <AuthGuard requiredRole="mentor">
-      <MentorDashboardContent />
+      {/* useSearchParams (tab sync) needs a Suspense boundary for `next build`. */}
+      <Suspense fallback={<ShellFallback />}>
+        <MentorDashboard />
+      </Suspense>
     </AuthGuard>
   );
 }

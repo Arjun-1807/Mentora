@@ -155,6 +155,7 @@ from typing import Optional  # noqa: E402
 from fastapi import Query  # noqa: E402
 
 from app.db.mongo import get_matches_collection  # noqa: E402
+from app.services.matches import enrich_match_docs  # noqa: E402
 
 
 def _mentor_object_id_from_user(user_doc: dict) -> Optional[ObjectId]:
@@ -216,7 +217,7 @@ async def get_mentor_matches(
         logger.exception("Failed to load mentor matches for mentor %s", mentor_id_str)
         raise HTTPException(status_code=502, detail="Could not load your match requests. Please try again shortly.")
 
-    return {"matches": [_jsonable_match(doc) for doc in docs]}
+    return {"matches": enrich_match_docs([_jsonable_match(doc) for doc in docs], include_startup_email=True)}
 
 
 @router.patch("/mentor/matches/{match_id}")

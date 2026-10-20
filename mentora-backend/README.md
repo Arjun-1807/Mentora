@@ -34,6 +34,12 @@ with feedback that feeds back into ranking.
   profile and re-embeds it for vector search.
 - `POST /evaluate` — retrieval metrics (precision@5, recall@5, MRR,
   NDCG@5, mean cosine) of the matching pipeline against ground truth.
+- `GET /dashboard/stats`, `GET /mentor/stats` — dashboard stat cards.
+- `/calendar/*` — Google Calendar OAuth, mentor weekly availability and
+  booking a Google Meet meeting on both calendars.
+- `/health/*` — startup health score from post-meeting outcomes, plus a
+  coordinator cohort view.
+- Roles: `startup`, `mentor` and `coordinator` (incubator staff).
 
 ## 1. Install dependencies
 
@@ -80,7 +86,39 @@ Optional overrides (all documented in `.env.example`): `GROQ_MODEL`,
 10 MB), `RATE_LIMIT_ENABLED`, `LOGIN_RATE_LIMIT`,
 `LOGIN_RATE_WINDOW_SECONDS`, `LLM_RATE_LIMIT`, `LLM_RATE_WINDOW_SECONDS`.
 
+Google Calendar (optional — without the id/secret every `/calendar/*`
+endpoint except the slot endpoints and `/calendar/status` answers `503
+"Google Calendar is not configured."`):
+
+```
+GOOGLE_CLIENT_ID=<...>.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=<...>
+GOOGLE_REDIRECT_URI=http://localhost:3000/calendar/callback   # default
+CALENDAR_TIMEZONE=Asia/Kolkata                                # default; IANA zone booked slot times are in
+```
+
 Never commit `.env` — it's already excluded via `.gitignore`.
+
+### Google Cloud setup (Calendar)
+
+1. In the [Google Cloud console](https://console.cloud.google.com/) create
+   (or pick) a project.
+2. **APIs & Services → Library**: enable the **Google Calendar API**.
+3. **APIs & Services → OAuth consent screen**: configure it (User type
+   *External* is fine for development), add the scopes
+   `.../auth/calendar.events` and `.../auth/calendar.readonly`, and — while
+   the app is in *Testing* — add every Google account you will sign in
+   with under **Test users** (others get "access blocked").
+4. **APIs & Services → Credentials → Create credentials → OAuth client
+   ID**, application type **Web application**. Under **Authorised
+   redirect URIs** add exactly `http://localhost:3000/calendar/callback`
+   (the frontend page that receives `code` + `state` and POSTs them to
+   `/calendar/callback`). Authorised JavaScript origins are not needed.
+5. Copy the client ID and secret into `GOOGLE_CLIENT_ID` /
+   `GOOGLE_CLIENT_SECRET` and restart the backend.
+
+Both the startup and the mentor must connect their calendar (dashboard →
+"Connect Google Calendar") before a meeting can be booked.
 
 ## 3. Create the MongoDB Atlas Vector Search index
 
@@ -161,6 +199,10 @@ failures are logged rather than fatal.
 | `matches` | `user_id, mentor_id, profile_fingerprint` | yes (partial: `user_id` exists) | De-duplicates repeated `/match` calls. |
 | `feedback` | `match_id` | yes | Enforces one feedback per match. |
 | `feedback` | `mentor_id` | no | Backs the `effectiveness_score` aggregation. |
+| `oauth_states` | `state` | yes | One-time Google OAuth state tokens. |
+| `oauth_states` | `created_at` (TTL 15 min) | no | Abandoned OAuth states expire on their own (the callback also checks the age). |
+| `meeting_notes` | `startup_id, timestamp` | no | Last-5-notes health score computation. |
+| `meeting_notes` | `match_id` | no | Per-match note lookups. |
 
 ## 5. Seed the mentors collection
 
@@ -220,6 +262,10 @@ message (e.g. `"rating: Input should be less than or equal to 5"`) and
 logged and answered with a generic `500 {"error": "Internal server
 error."}` — tracebacks never reach the client.
 
+A few errors are *structured*: they keep extra keys next to `error` and
+`detail`, e.g. the booking endpoint's
+`403 {"error": "calendar_not_connected", "user": "mentor", "detail": "..."}`.
+
 ### `POST /register`
 
 Auth: none. Body:
@@ -235,7 +281,8 @@ Auth: none. Body:
 
 - `password`: minimum 8 characters, maximum 72 **bytes** (bcrypt's hard
   limit — longer passwords are rejected with `422` rather than 500-ing).
-- `role`: `"startup"` or `"mentor"`.
+- `role`: `"startup"`, `"mentor"` or `"coordinator"` (incubator staff;
+  no profile needed — coordinators see `GET /health/cohort`).
 - For `role: "mentor"`, `profile` is validated and requires only a
   `name` and at least one `sector_expertise` entry (a list, or a
   comma-separated string):
@@ -275,11 +322,14 @@ Auth: required. Response `200`:
   "role": "startup",
   "profile": {},
   "mentor_id": null,
-  "created_at": "2026-01-01T00:00:00+00:00"
+  "created_at": "2026-01-01T00:00:00+00:00",
+  "calendar_connected": false
 }
 ```
 
-The password hash is never returned. Errors: `401`, `404` if the account
+`calendar_connected` is true once the user has connected Google Calendar
+(the stored tokens themselves are never returned). The password hash is
+never returned. Errors: `401`, `404` if the account
 was deleted.
 
 ### `POST /extract`
@@ -294,9 +344,22 @@ Auth: required. Rate-limited per user. `multipart/form-data`, field name
     "stage": "MVP",
     "challenges": ["Customer acquisition cost is high", "Limited runway"],
     "team_gaps": ["No dedicated CTO", "No sales lead"],
-    "geography": "San Francisco, CA"
+    "geography": "San Francisco, CA",
+    "deck_feedback": {
+      "confidence_score": 72,
+      "strong_signals": ["Domain clearly identified as Fintech"],
+      "weak_signals": ["Geography and traction not mentioned"],
+      "improvement_tips": ["Add a traction slide with revenue or user numbers"]
+    }
   }
   ```
+- `deck_feedback` comes from a second Groq call (JSON mode) that rates how
+  well a mentor could assess fit from the extracted profile.
+  `confidence_score` is clamped to an integer 0-100 and `improvement_tips`
+  is truncated to 3. **It can never fail the request**: any problem (Groq
+  error, missing key, malformed JSON, schema violation) is logged as a
+  warning and replaced by the default
+  `{"confidence_score": 60, "strong_signals": [], "weak_signals": [], "improvement_tips": []}`.
 - Errors: `400` `"Only PDF files are accepted"`, empty or
   corrupt/password-protected file; `413` larger than `MAX_UPLOAD_BYTES`;
   `422` `"Deck appears to be image-based or empty. Please upload a
@@ -551,6 +614,107 @@ Auth: required. Per-mentor aggregates for the dashboard:
 }
 ```
 
+### `GET /dashboard/stats`
+
+Auth: required. Scoped like `/matches/all` (a startup's own matches; a
+mentor's incoming matches). Response:
+`{"total_matches": 7, "emails_sent": 5, "meetings_accepted": 3, "avg_rating": 4.5}`
+
+- `emails_sent`: matches at `email_sent` or later, or carrying `email_sent_at`.
+- `meetings_accepted`: `accepted` + `meeting_scheduled` + `completed`.
+- `avg_rating`: mean rating of the caller's feedback (`null` if none).
+
+### `GET /mentor/stats`
+
+Auth: mentor only (`403` otherwise). Response:
+`{"pending_requests": 3, "accepted": 4, "avg_rating": 3.5, "total_helped": 2}`
+
+- `pending_requests`: `pending` / `emailed` / `email_sent` (the mentor's "Requests").
+- `accepted`: `accepted` / `meeting_scheduled` / `completed`.
+- `avg_rating`: mean rating of feedback received (`null` if none).
+- `total_helped`: distinct startups with a `meeting_scheduled` / `completed` match.
+
+### Google Calendar
+
+Scopes requested: `https://www.googleapis.com/auth/calendar.events` and
+`https://www.googleapis.com/auth/calendar.readonly`, with
+`access_type=offline` and `prompt=consent` (so Google returns a refresh
+token). Tokens are stored on the user document under `google_calendar`
+(`access_token`, `refresh_token`, `token_expiry`, `scopes`) and refreshed
+automatically when expired. `503 "Google Calendar is not configured."`
+when `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` are missing.
+
+- **`GET /calendar/auth-url`** (auth) → `{"auth_url": "https://accounts.google.com/..."}`.
+  Stores a random one-time `state` in `oauth_states` together with the
+  PKCE `code_verifier` that google-auth-oauthlib generates (it is needed
+  again at token exchange). States expire after 15 minutes.
+- **`POST /calendar/callback`** (no auth) body `{"code", "state"}` →
+  `{"success": true, "role": "mentor"}`. Validates + consumes the state,
+  exchanges the code and stores the tokens on the user who started the
+  flow. `400` for an unknown/used/expired state, a rejected code, or if
+  calendar access was not granted; `502` if Google is unreachable.
+- **`GET /calendar/status`** (auth) → `{"connected": true}`.
+- **`POST /calendar/slots`** (mentor) body
+  `{"slots": [{"day": "Monday", "start_time": "09:00", "end_time": "11:00"}]}`
+  → the stored slots (de-duplicated, sorted Monday→Sunday). Replaces the
+  mentor's weekly `availability_slots`. `day` must be `Monday`..`Sunday`,
+  times 24-hour `HH:MM`, `start_time < end_time` (else `422`).
+- **`GET /calendar/slots/{mentor_id}`** (no auth; mentors-collection `_id`)
+  → `{"slots": [...]}` (`404` unknown mentor).
+- **`POST /calendar/book`** (startup only) body
+  `{"mentor_id", "match_id" (the uuid from /match), "slot": {"date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM"}, "description"}`
+  → `{"success": true, "event_id", "meet_link", "html_link", "title", "start", "end"}`
+  (`start`/`end` are ISO datetimes in `CALENDAR_TIMEZONE`). Creates the
+  event "Mentora: {startup domain} × {mentor name}" on the startup's
+  primary calendar with both emails as attendees (so it appears on both
+  calendars; invitations are sent) and a Google Meet conference, then sets
+  the match to `meeting_scheduled` and stores
+  `meeting: {date, start_time, end_time, event_id, meet_link, html_link, title}`.
+  Errors: `403` not your match, or
+  `{"error": "calendar_not_connected", "user": "startup"|"mentor", "detail": ...}`
+  when either side has not connected (or must reconnect) Google Calendar;
+  `400` `mentor_id` is not the match's mentor; `404` unknown match/mentor;
+  `409` match not `accepted`/`meeting_scheduled`, or the slot is outside
+  the mentor's availability (checked only if the mentor has slots);
+  `422` invalid body or a slot in the past; `502` Google API failure.
+
+### Startup health score
+
+`POST /health/log` stores a post-meeting outcome in `meeting_notes`
+(`match_id, startup_id, mentor_id, timestamp, momentum_score,
+blockers_resolved, mentor_engagement, notes, submitted_by`) and recomputes
+the startup's score from its **last 5** notes:
+
+```
+health_score = (avg_momentum / 5 × 0.5 + avg_engagement / 5 × 0.3 + resolved_rate × 0.2) × 100
+```
+
+`avg_momentum` / `avg_engagement` are the 1-5 averages, `resolved_rate`
+the share (0-1) of notes with `blockers_resolved: true`. This is the
+*normalised* form of the original `(avg_momentum × 0.5 + avg_engagement ×
+0.3 + resolved_rate × 0.2) × 20`, which mixed 1-5 averages with a 0-1 rate
+so a perfect record scored only 84; dividing the averages by 5 makes a
+perfect record score exactly 100 (the minimum reachable is 16). Trend
+compares the new score with the previous history entry: `up` if ≥ +5,
+`down` if ≤ −5, else `stable`.
+
+- **`POST /health/log`** (auth; the startup owning the match or the mentor
+  on it — `403` otherwise) body
+  `{"match_id", "momentum_score": 1-5, "blockers_resolved": bool, "mentor_engagement": 1-5, "notes"?}`
+  → `{"health_score": 74.0, "trend": "up"}`. `match_id` is the uuid (the
+  Mongo `_id` is accepted too). Updates the startup user's `health_score`,
+  `health_trend`, `health_updated_at` and appends to `health_history`;
+  adds the submitter's role to the match's `health_logged_by`. `422` for
+  out-of-range scores, `404` unknown match.
+- **`GET /health/cohort`** (coordinator only) →
+  `{"startups": [{"user_id", "email", "domain", "stage", "health_score"|null, "trend", "match_count", "meeting_count", "last_activity"|null, "health_history": [{"score", "timestamp"}]}]}`
+  — `domain`/`stage` from the startup's latest match profile,
+  `meeting_count` = matches at `meeting_scheduled`/`completed`,
+  `health_history` = last 10 points; sorted lowest score first.
+- **`GET /health/{startup_id}`** (auth; the startup itself, a coordinator,
+  or a mentor matched with that startup; `me` = the caller) →
+  `{"health_score"|null, "trend", "health_history": [...last 10], "last_updated"|null}`.
+
 ### `GET /` and `GET /health`
 
 Auth: none. `{"status": "ok", ...}` / `{"status": "healthy"}`.
@@ -565,11 +729,19 @@ forwards** and only for the owning user (`app/services/matches.py`):
 | `pending` | `POST /match` (on insert) | Matched, no outreach yet. |
 | `emailed` | `POST /email` with a `match_id` | An intro email was drafted for this match. |
 | `email_sent` | `POST /feedback-status` | The intro email was actually delivered (also sets `email_sent_at`). |
+| `accepted` | `PATCH /mentor/matches/{id}` | The mentor accepted the request. |
+| `meeting_scheduled` | `POST /calendar/book` | A Google Calendar meeting was booked (the match carries `meeting`). |
 | `completed` | `POST /feedback` | Feedback recorded; the loop is closed. |
+| `declined` | `PATCH /mentor/matches/{id}` | Terminal side-branch: the mentor declined. |
 
 `advance_match_status()` only updates a match whose current status is
-earlier in that list, so a status never regresses and the frontend's
-status badge / "Emails Sent" stats reflect reality.
+earlier in the forward list (`pending → emailed → email_sent → accepted →
+meeting_scheduled → completed`), so a status never regresses and the
+frontend's status badge / "Emails Sent" stats reflect reality; `declined`
+is never advanced from. Match documents also store `mentor_name` /
+`mentor_email` (set by `/match`; `/matches/all` and `/mentor/matches`
+backfill `mentor_name` for older documents, and `/mentor/matches` adds
+`startup_email`).
 
 ## Scoring / matching details
 
@@ -655,13 +827,18 @@ mentora-backend/
       feedback.py             # POST /feedback, POST /feedback-status, GET /feedback/summary
       mentor.py               # PATCH /mentor/profile (mentor onboarding)
       evaluate.py             # POST /evaluate (retrieval metrics)
+      calendar.py             # /calendar/* (Google OAuth, availability, booking)
+      health.py               # /health/log, /health/cohort, /health/{startup_id}
+      stats.py                # GET /dashboard/stats, GET /mentor/stats
     services/
       pdf_extract.py          # PyMuPDF text extraction + size cap
-      llm.py                  # Groq profile extraction (prompt + JSON validation)
+      llm.py                  # Groq profile extraction + deck feedback (prompt + JSON validation)
       email_gen.py            # Groq intro-email drafting
       embeddings.py           # sentence-transformers BGE wrapper (singleton)
       mentor_matching.py      # Atlas $vectorSearch query + weighted re-rank
-      matches.py              # match de-duplication + status lifecycle
+      matches.py              # match de-duplication + status lifecycle + enrichment
+      google_calendar.py      # Google OAuth flow, token refresh, Meet event creation
+      health.py               # health score formula + trend
       evaluation.py           # precision/recall/MRR/NDCG metric functions
       auth.py                 # bcrypt hashing + JWT issue/verify
       auth_dependency.py      # get_current_user bearer-token dependency

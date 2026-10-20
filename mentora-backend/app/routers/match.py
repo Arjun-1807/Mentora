@@ -22,7 +22,7 @@ from app.models.schemas import (
     StartupProfile,
 )
 from app.services.auth_dependency import get_current_user
-from app.services.matches import record_matches
+from app.services.matches import enrich_match_docs, record_matches
 from app.services.mentor_matching import ensure_mentors_exist, find_matching_mentors
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,8 @@ async def get_all_matches(user=Depends(get_current_user)) -> dict:
     except Exception:
         logger.exception("Failed to list match records for user %s", user_id)
         raise HTTPException(status_code=502, detail="Could not load match history. Please try again shortly.")
+
+    enrich_match_docs(docs)
 
     return {"matches": docs}
 

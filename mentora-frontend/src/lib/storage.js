@@ -6,6 +6,7 @@
 
 export const TOKEN_KEY = "token";
 export const USER_ROLE_KEY = "userRole";
+export const USER_EMAIL_KEY = "userEmail";
 export const STARTUP_PROFILE_KEY = "startupProfile";
 export const MENTOR_MATCHES_KEY = "mentorMatches";
 
@@ -73,7 +74,7 @@ export function clearToken() {
   emitAuthChange();
 }
 
-/** Reads the stored role ("startup" | "mentor") or null. */
+/** Reads the stored role ("startup" | "mentor" | "coordinator") or null. */
 export function getUserRole() {
   return read(USER_ROLE_KEY);
 }
@@ -83,11 +84,47 @@ export function setUserRole(role) {
   if (role) write(USER_ROLE_KEY, role);
 }
 
+/** Reads the signed-in user's email (cached at login/register) or null. */
+export function getUserEmail() {
+  return read(USER_EMAIL_KEY);
+}
+
+export function setUserEmail(email) {
+  if (email) write(USER_EMAIL_KEY, String(email).trim());
+}
+
+/** Where each role lands after signing in (and when it hits a page for another role). */
+export const ROLE_HOME = {
+  startup: "/dashboard",
+  mentor: "/mentor/dashboard",
+  coordinator: "/coordinator/cohort",
+};
+
+/** Home route for a role; unknown/missing roles fall back to the startup dashboard. */
+export function roleHome(role) {
+  return ROLE_HOME[role] || ROLE_HOME.startup;
+}
+
+/**
+ * Reads the `role` claim from a JWT without verifying it — only used to pick
+ * a landing page; the backend still verifies the token on every request.
+ */
+export function roleFromToken(token) {
+  try {
+    const part = String(token).split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = part + "=".repeat((4 - (part.length % 4)) % 4);
+    return JSON.parse(atob(padded))?.role || null;
+  } catch {
+    return null;
+  }
+}
+
 /** Clears the token plus any cached per-user data (used on sign out). */
 export function clearSession() {
   remove(STARTUP_PROFILE_KEY);
   remove(MENTOR_MATCHES_KEY);
   remove(USER_ROLE_KEY);
+  remove(USER_EMAIL_KEY);
   clearToken();
 }
 

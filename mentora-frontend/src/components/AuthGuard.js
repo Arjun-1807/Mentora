@@ -4,40 +4,47 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { useRequireAuth } from "@/hooks/use-auth";
+import { roleHome } from "@/lib/storage";
 
 /**
  * Wraps a protected page. While we're reading the token (and if there isn't
  * one) it renders a loading frame instead of the page, so protected content
  * never flashes before the redirect to /login.
  *
- * Optional `requiredRole` ("startup" | "mentor"):
- *   - If the signed-in user has the wrong role, redirects them to their own
- *     dashboard instead of showing a 403.
- *   - Leave undefined to allow any authenticated role (existing behaviour).
+ * Optional `requiredRole` ("startup" | "mentor" | "coordinator", or an array
+ * of them):
+ *   - The role comes from /me, falling back to localStorage `userRole` if
+ *     /me can't be reached.
+ *   - A signed-in user with another role is sent to their own home
+ *     (startup /dashboard, mentor /mentor/dashboard, coordinator
+ *     /coordinator/cohort) instead of seeing a 403.
+ *   - Leave undefined to allow any authenticated role.
  */
 export default function AuthGuard({ children, requiredRole }) {
   const router = useRouter();
-  const { status, user } = useRequireAuth();
+  const { status, user, userStatus, role } = useRequireAuth();
+
+  const allowed = requiredRole
+    ? Array.isArray(requiredRole)
+      ? requiredRole
+      : [requiredRole]
+    : null;
+  // Prefer the server's answer; only trust the cached role once /me is done.
+  const resolvedRole = user?.role || (userStatus === "error" || userStatus === "ready" ? role : null);
+  const roleKnown = Boolean(resolvedRole);
+  const roleSettled = roleKnown || userStatus === "error" || userStatus === "ready";
+  const wrongRole = Boolean(allowed && roleKnown && !allowed.includes(resolvedRole));
 
   useEffect(() => {
-    if (status !== "signed-in" || !requiredRole || !user?.role) return;
-    if (user.role === requiredRole) return;
-
-    // Redirect wrong-role users to their own dashboard.
-    const correctDash = user.role === "mentor" ? "/mentor/dashboard" : "/dashboard";
-    router.replace(correctDash);
-  }, [status, user, requiredRole, router]);
+    if (status !== "signed-in" || !wrongRole) return;
+    router.replace(roleHome(resolvedRole));
+  }, [status, wrongRole, resolvedRole, router]);
 
   if (status === "signed-in") {
-    // If role check is needed and user data hasn't loaded yet, keep showing
-    // the loader so protected content doesn't flash.
-    if (requiredRole && !user?.role) {
-      return <LoadingFrame status="loading" />;
-    }
-    // Wrong role — redirect is in-flight, keep spinner visible.
-    if (requiredRole && user?.role && user.role !== requiredRole) {
-      return <LoadingFrame status="loading" />;
-    }
+    // Role check pending — keep the loader so protected content doesn't flash.
+    if (allowed && !roleSettled) return <LoadingFrame status="loading" />;
+    // Wrong role — redirect is in flight.
+    if (wrongRole) return <LoadingFrame status="redirecting" />;
     return children;
   }
 
@@ -56,7 +63,9 @@ function LoadingFrame({ status }) {
         <p className="text-sm">
           {status === "signed-out"
             ? "Redirecting you to sign in…"
-            : "Checking your session…"}
+            : status === "redirecting"
+              ? "Taking you to your dashboard…"
+              : "Checking your session…"}
         </p>
       </div>
     </main>
