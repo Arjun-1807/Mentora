@@ -11,9 +11,19 @@ binary relevance (a mentor is either relevant or not).
   NDCG@k      = DCG@k / IDCG@k, with DCG = sum(rel_i / log2(i + 1)) over
                 ranks i = 1..k and IDCG the DCG of an ideal ranking that
                 puts min(|ground truth|, k) relevant mentors first.
+
+Graded relevance (used by scripts/eval_matching.py; the /evaluate API
+keeps the binary metrics above unchanged):
+
+  graded NDCG@k = DCG@k / IDCG@k with DCG = sum((2^g_i - 1) / log2(i + 1)),
+                  g_i the 0-2 grade of the mentor at rank i (0 if unjudged)
+                  and IDCG the DCG of the grades sorted best-first.
+  score spread  = top-1 score - top-k score of one ranking: how strongly the
+                  scorer separates its best candidate from the rest of the
+                  shortlist (a near-zero spread means the ranking is noise).
 """
 import math
-from typing import Iterable, List, Optional, Sequence, Set
+from typing import Iterable, List, Mapping, Optional, Sequence, Set
 
 DEFAULT_K = 5
 
@@ -63,3 +73,32 @@ def ndcg_at_k(ranked_ids: Sequence[str], ground_truth: Iterable[str], k: int = D
 def mean_score(scores: Iterable[Optional[float]]) -> float:
     values: List[float] = [float(s) for s in scores if s is not None]
     return sum(values) / len(values) if values else 0.0
+
+
+def _gain(grade: float) -> float:
+    return 2.0 ** float(grade) - 1.0
+
+
+def graded_ndcg_at_k(ranked_ids: Sequence[str], grades: Mapping[str, float], k: int = DEFAULT_K) -> float:
+    """NDCG@k with graded relevance (exponential gain 2^grade - 1).
+
+    `grades` maps mentor id -> relevance grade (e.g. 0-2); ids missing from
+    it count as grade 0. Returns 0.0 when nothing is relevant.
+    """
+    if k <= 0:
+        return 0.0
+    dcg = sum(
+        _gain(grades.get(mentor_id, 0)) / math.log2(rank + 1)
+        for rank, mentor_id in enumerate(ranked_ids[:k], start=1)
+    )
+    ideal = sorted((float(g) for g in grades.values() if g and g > 0), reverse=True)[:k]
+    idcg = sum(_gain(g) / math.log2(rank + 1) for rank, g in enumerate(ideal, start=1))
+    return dcg / idcg if idcg else 0.0
+
+
+def score_spread(scores: Sequence[float], k: int = DEFAULT_K) -> float:
+    """Top-1 minus top-k score of a best-first score list (0.0 if < 2 scores)."""
+    top = [float(s) for s in scores[:k]]
+    if len(top) < 2:
+        return 0.0
+    return top[0] - top[-1]

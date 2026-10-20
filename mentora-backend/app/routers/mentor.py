@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.db.mongo import get_mentors_collection, get_users_collection
 from app.models.schemas import MentorProfileUpdate, MentorProfileUpdateResponse
 from app.services.auth_dependency import get_current_user
-from app.services.embeddings import build_mentor_profile_text, embed_passage
+from app.services.embeddings import build_mentor_profile_text, embed_passage, embed_passages
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +56,11 @@ async def update_mentor_profile(
 ) -> MentorProfileUpdateResponse:
     """Save the mentor's onboarding profile and re-embed it.
 
-    `domain`, `expertise` and `stage_focus` are derived from the submitted
-    sectors and preferred stages so the matching pipeline (which reads
-    those fields) sees the new profile. Errors: 403 for non-mentor
+    `domain` and `stage_focus` are derived from the submitted sectors and
+    preferred stages so the matching pipeline (which reads those fields)
+    sees the new profile; `skills` are stored with one embedding each
+    (`skill_embeddings`) for need-fit matching. `expertise` is left as it
+    was (it is no longer overwritten with the sectors). Errors: 403 for non-mentor
     accounts, 404 if the account has no linked mentor document, 422 on
     invalid input, 502 if embedding or the database write fails.
     """
@@ -75,7 +77,7 @@ async def update_mentor_profile(
 
     mentors = get_mentors_collection()
     try:
-        existing = mentors.find_one({"_id": mentor_object_id}, {"_id": 1})
+        existing = mentors.find_one({"_id": mentor_object_id}, {"_id": 1, "expertise": 1})
     except Exception:
         logger.exception("Failed to load mentor %s", mentor_object_id)
         raise HTTPException(status_code=502, detail="Could not load your mentor profile. Please try again shortly.")
@@ -83,23 +85,28 @@ async def update_mentor_profile(
         raise HTTPException(status_code=404, detail="No mentor profile is linked to this account.")
 
     stage_focus = derive_stage_focus(request.preferred_stages)
+    # `expertise` is deliberately NOT overwritten with the sector list any
+    # more (that made it useless for matching); sectors live in
+    # `sector_expertise`, functional skills in `skills`.
     profile: Dict[str, Any] = {
         **request.model_dump(),
         "domain": request.sector_expertise[0],
-        "expertise": list(request.sector_expertise),
         "stage_focus": stage_focus,
     }
+    expertise = list(existing.get("expertise") or [])
 
     text = build_mentor_profile_text(
         domain=profile["domain"],
         stage_focus=stage_focus,
-        expertise=profile["expertise"],
+        expertise=expertise,
+        skills=request.skills,
         bio=request.bio,
         past_exits=request.past_exits,
         years_experience=request.years_experience,
     )
     try:
         embedding = embed_passage(text)
+        skill_embeddings = embed_passages(request.skills)
     except Exception as exc:
         logger.exception("Failed to embed updated profile for mentor %s", mentor_object_id)
         raise HTTPException(
@@ -116,6 +123,7 @@ async def update_mentor_profile(
                     **profile,
                     "email": user_doc.get("email"),
                     "embedding": embedding,
+                    "skill_embeddings": skill_embeddings,
                     "onboarding_completed": True,
                     "updated_at": now,
                 }

@@ -6,29 +6,40 @@ that profile is for mentor matching.
 """
 import json
 import logging
-from typing import Optional
+from typing import Optional, get_args
 
 from fastapi import HTTPException
 from groq import Groq
 from pydantic import ValidationError
 
 from app.config import settings
-from app.models.schemas import DeckFeedback, StartupProfile
+from app.models.schemas import MAX_STARTUP_SECTORS, DeckFeedback, MentorSector, StartupProfile
 
 logger = logging.getLogger(__name__)
+
+# The sector vocabulary mentors pick from at onboarding (MentorSector); the
+# extraction is constrained to it so domain_match compares like with like.
+SECTOR_CHOICES = list(get_args(MentorSector))
+_SECTOR_LIST = ", ".join(f'"{sector}"' for sector in SECTOR_CHOICES)
 
 SYSTEM_PROMPT = (
     "You are an expert startup analyst. You will be given raw text extracted "
     "from a startup's pitch deck or business document. Analyze it and return "
     "ONLY a single JSON object (no prose, no markdown fences, no explanation) "
     "with exactly these fields:\n"
-    '  "domain": a short string naming the industry/domain, e.g. "Fintech", '
-    '"HealthTech", "EdTech", "SaaS", "E-commerce", "AI/ML", "Climate Tech".\n'
+    f'  "sectors": a list of 1 or 2 sectors, best fit first, each EXACTLY one of: {_SECTOR_LIST}. '
+    'Use a second sector only when the startup clearly spans two (e.g. ["AgriTech", "FinTech"] '
+    'for farm credit); AI/ML, robotics and hardware are "DeepTech", e-commerce and consumer '
+    'brands are "D2C", climate/energy/EV are "Clean Energy". Use "Others" only if nothing fits.\n'
+    '  "domain": the first entry of "sectors".\n'
     '  "stage": one of exactly "idea", "MVP", or "growth".\n'
     '  "challenges": a list of short strings describing the key challenges the '
     "startup currently faces.\n"
     '  "team_gaps": a list of short strings describing skill or role gaps in '
     "the founding team.\n"
+    '  "geography": the city where the startup is based, as a plain city name '
+    '(e.g. "Bangalore", "Mumbai", "London"), "Remote" if the team is fully remote, '
+    "or null if the document does not say. Do not guess.\n"
     "Return valid JSON and nothing else."
 )
 
@@ -37,14 +48,16 @@ STRICT_SYSTEM_PROMPT = (
     "You are a JSON generator. Your previous answer could not be parsed. "
     "Output EXACTLY one JSON object and NOTHING else: no markdown, no code "
     "fences, no comments, no text before or after it.\n"
-    "The object MUST have exactly these four keys and types:\n"
-    '  "domain": string (non-empty), e.g. "Fintech"\n'
+    "The object MUST have exactly these keys and types:\n"
+    f'  "sectors": array of 1-2 strings, each exactly one of {_SECTOR_LIST}\n'
+    '  "domain": string (non-empty), the first entry of "sectors"\n'
     '  "stage": string, one of exactly "idea", "MVP", "growth" (case-sensitive)\n'
     '  "challenges": array of strings (may be empty)\n'
     '  "team_gaps": array of strings (may be empty)\n'
+    '  "geography": string city name, "Remote", or null\n'
     "Example of the required shape:\n"
-    '{"domain": "HealthTech", "stage": "MVP", "challenges": ["Clinical '
-    'validation"], "team_gaps": ["No CTO"]}'
+    '{"sectors": ["HealthTech"], "domain": "HealthTech", "stage": "MVP", '
+    '"challenges": ["Clinical validation"], "team_gaps": ["No CTO"], "geography": "Bangalore"}'
 )
 
 # Client-facing message when both attempts fail validation.
@@ -115,9 +128,31 @@ def _parse_profile(raw_content: str) -> Optional[StartupProfile]:
             return None
 
     try:
-        return StartupProfile.model_validate(data)
+        return normalise_sectors(StartupProfile.model_validate(data))
     except ValidationError:
         return None
+
+
+def normalise_sectors(profile: StartupProfile) -> StartupProfile:
+    """Snap the LLM's `sectors` (or, if it gave none, its `domain`) onto the
+    MentorSector vocabulary and keep `domain` == the first sector.
+
+    Labels the vocabulary cannot place are dropped; if nothing is left the
+    profile keeps its original free-text `domain` and empty `sectors`, so
+    the extraction never fails over vocabulary.
+    """
+    # Local import: keeps this module importable without the embedding stack.
+    from app.services.mentor_matching import canonical_domain
+
+    sectors = []
+    for label in list(profile.sectors) or [profile.domain]:
+        canonical = canonical_domain(label)
+        if canonical in SECTOR_CHOICES and canonical not in sectors:
+            sectors.append(canonical)
+    sectors = sectors[:MAX_STARTUP_SECTORS]
+    if not sectors:
+        return profile.model_copy(update={"sectors": []})
+    return profile.model_copy(update={"sectors": sectors, "domain": sectors[0]})
 
 
 def extract_startup_profile(text: str) -> StartupProfile:

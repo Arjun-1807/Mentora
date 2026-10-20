@@ -5,6 +5,7 @@ pymupdf>=1.24.0
 groq>=0.9.0
 sentence-transformers>=3.0.0
 torch>=2.2.0
+numpy>=1.26.0          # need-fit similarity matrices (also a sentence-transformers dependency)
 pymongo>=4.7.0
 pydantic>=2.7.0
 pydantic-settings>=2.2.0

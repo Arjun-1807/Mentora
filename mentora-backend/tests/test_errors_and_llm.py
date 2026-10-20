@@ -81,7 +81,9 @@ def test_extract_retries_once_with_strict_prompt(monkeypatch):
 
     monkeypatch.setattr(llm, "_call_groq", fake_call)
     profile = llm.extract_startup_profile("deck text")
-    assert profile.domain == "Fintech"
+    # Phase 4: the free-text domain is snapped onto the MentorSector vocabulary.
+    assert profile.domain == "FinTech"
+    assert profile.sectors == ["FinTech"]
     assert calls == [llm.SYSTEM_PROMPT, llm.STRICT_SYSTEM_PROMPT]
 
 
@@ -106,7 +108,42 @@ def test_extract_does_not_retry_a_valid_response(monkeypatch):
     assert len(calls) == 1
 
 
-# --- /email 503 -------------------------------------------------------------
+# --- Phase 4: sectors constrained to the MentorSector vocabulary ---------------
+
+@pytest.mark.parametrize(
+    "raw, sectors, domain",
+    [
+        ('{"sectors": ["AgriTech", "FinTech"], "domain": "AgriTech", "stage": "idea"}',
+         ["AgriTech", "FinTech"], "AgriTech"),
+        ('{"sectors": ["Climate Tech"], "domain": "Climate Tech", "stage": "MVP"}', ["Clean Energy"], "Clean Energy"),
+        ('{"sectors": ["AI/ML", "E-commerce", "SaaS"], "domain": "AI/ML", "stage": "MVP"}',
+         ["DeepTech", "D2C"], "DeepTech"),
+        ('{"domain": "InsurTech", "stage": "MVP"}', ["FinTech"], "FinTech"),
+        ('{"sectors": ["Gaming"], "domain": "Gaming", "stage": "idea"}', [], "Gaming"),
+        ('{"sectors": ["Others"], "domain": "Others", "stage": "idea"}', ["Others"], "Others"),
+    ],
+)
+def test_extracted_sectors_snap_to_the_mentor_sector_vocabulary(monkeypatch, raw, sectors, domain):
+    monkeypatch.setattr(llm, "_call_groq", lambda text, **kw: raw)
+    profile = llm.extract_startup_profile("deck text")
+    assert profile.sectors == sectors
+    assert profile.domain == domain
+
+
+def test_extraction_prompts_list_every_mentor_sector():
+    assert len(llm.SECTOR_CHOICES) == 10
+    for sector in llm.SECTOR_CHOICES:
+        assert f'"{sector}"' in llm.SYSTEM_PROMPT
+        assert f'"{sector}"' in llm.STRICT_SYSTEM_PROMPT
+
+
+def test_startup_profile_sectors_are_optional_and_capped_at_two():
+    assert StartupProfile(domain="Fintech", stage="MVP").sectors == []
+    profile = StartupProfile(domain="Fintech", stage="MVP", sectors=["FinTech", "SaaS", "D2C"])
+    assert profile.sectors == ["FinTech", "SaaS"]
+
+
+# --- /email 503-------------------------------------------------------------
 
 def test_email_missing_api_key_is_503(monkeypatch):
     monkeypatch.setattr(email_gen.settings, "GROQ_API_KEY", "")

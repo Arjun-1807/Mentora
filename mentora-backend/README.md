@@ -176,18 +176,41 @@ or the Atlas Admin API.
 ```json
 {
   "fields": [
-    {
-      "type": "vector",
-      "path": "embedding",
-      "numDimensions": 768,
-      "similarity": "cosine"
-    }
+    { "type": "vector", "path": "embedding", "numDimensions": 768, "similarity": "cosine" },
+    { "type": "filter", "path": "listed" },
+    { "type": "filter", "path": "active" },
+    { "type": "filter", "path": "visibility.scope" },
+    { "type": "filter", "path": "visibility.org_ids" }
   ]
 }
 ```
 
+   The `filter` fields are required by the `$vectorSearch` pre-filter in
+   `app/services/mentor_matching.py` (`listed != false AND active != false`;
+   documents without the fields count as listed/active). Without them Atlas
+   rejects the query and `/match` answers `502`. `visibility.*` is declared
+   ahead of the tenancy work so the index only has to be rebuilt once.
+
 4. Create the index and wait for its status to become **Active** (usually
    under a minute for a small collection).
+
+### Updating an existing index (the Phase 4 filter fields)
+
+An index created from the older vector-only definition must be updated
+**before** deploying this code:
+
+```bash
+# take a backup first if in doubt; the index keeps serving the old
+# definition while the new one builds
+MONGODB_DB_NAME=mentora venv/bin/python scripts/update_vector_index.py --dry-run --allow-prod-db
+MONGODB_DB_NAME=mentora venv/bin/python scripts/update_vector_index.py --allow-prod-db
+```
+
+The script calls `update_search_index` (or `create_search_index` if the
+index is missing) with exactly the definition above and waits until Atlas
+reports it `READY`. It refuses to touch the `mentora` database without
+`--allow-prod-db`. In the Atlas UI the equivalent is **Search → 
+mentor_vector_index → Edit index definition** and pasting the JSON above.
 
 ### Option B: mongosh
 
@@ -198,15 +221,15 @@ db.mentors.createSearchIndex(
   "vectorSearch",
   {
     fields: [
-      {
-        type: "vector",
-        path: "embedding",
-        numDimensions: 768,
-        similarity: "cosine"
-      }
+      { type: "vector", path: "embedding", numDimensions: 768, similarity: "cosine" },
+      { type: "filter", path: "listed" },
+      { type: "filter", path: "active" },
+      { type: "filter", path: "visibility.scope" },
+      { type: "filter", path: "visibility.org_ids" }
     ]
   }
 )
+// existing index: db.mentors.updateSearchIndex("mentor_vector_index", { fields: [ ...same... ] })
 ```
 
 ### Option C: Atlas Administration API
@@ -254,11 +277,26 @@ python seed_mentors.py
 This removes previously seeded mentors (every mentor document **without**
 a `user_id`) and inserts 15 mentor profiles, each with a
 `BAAI/bge-base-en-v1.5` embedding computed from their
-domain/stage_focus/expertise (passage-side, no query prefix — see
-"Embedding convention" below), a fake contact `email`
+domain/stage_focus/expertise/skills (passage-side, no query prefix — see
+"Embedding convention" below), a list of functional `skills` with one
+embedding per skill (`skill_embeddings`), a fake contact `email`
 (`…@mentors.mentora.dev`), `preferred_stages` and `seeded: true`. Mentors
-created through `POST /register` are kept. Re-run it after upgrading so
-the seeded mentors pick up their `email` field.
+created through `POST /register` are kept.
+
+**It refuses to run against the shared `mentora` database** (deleting the
+seeded mentors there would orphan existing match records) unless
+`--yes-clear-mentora` is passed. To bring an existing database up to date
+in place — seed skills, skill embeddings and re-embedded profiles, without
+deleting anything — use the idempotent backfill instead:
+
+```bash
+MONGODB_DB_NAME=mentora venv/bin/python scripts/backfill_mentor_skills.py --dry-run --allow-prod-db
+MONGODB_DB_NAME=mentora venv/bin/python scripts/backfill_mentor_skills.py --allow-prod-db
+```
+
+Seeded mentors (matched by seed email, no `user_id`) get the skills from
+`seed_mentors.py`; registered mentors keep the skills they entered at
+onboarding; every mentor is re-embedded with `build_mentor_profile_text()`.
 
 ## 6. Run the server
 
@@ -396,11 +434,12 @@ Auth: required. Rate-limited per user. `multipart/form-data`, field name
 - Response `200`:
   ```json
   {
-    "domain": "Fintech",
+    "domain": "FinTech",
+    "sectors": ["FinTech", "SaaS"],
     "stage": "MVP",
     "challenges": ["Customer acquisition cost is high", "Limited runway"],
     "team_gaps": ["No dedicated CTO", "No sales lead"],
-    "geography": "San Francisco, CA",
+    "geography": "Bangalore",
     "deck_feedback": {
       "confidence_score": 72,
       "strong_signals": ["Domain clearly identified as Fintech"],
@@ -409,6 +448,14 @@ Auth: required. Rate-limited per user. `multipart/form-data`, field name
     }
   }
   ```
+- `sectors` (1–2, best first) is constrained to the mentor onboarding
+  vocabulary (Clean Energy, EdTech, FinTech, HealthTech, AgriTech, SaaS,
+  D2C, DeepTech, Logistics, Others) and snapped onto it after the call
+  (e.g. "Climate Tech" → "Clean Energy", "AI/ML" → "DeepTech"); `domain` is
+  always `sectors[0]` (kept for older clients). If the model returns
+  nothing that maps onto the vocabulary, `sectors` is `[]` and `domain`
+  keeps the model's free text. `geography` is the city the deck names,
+  `"Remote"`, or `null` (the prompt tells the model not to guess).
 - `deck_feedback` comes from a second Groq call (JSON mode) that rates how
   well a mentor could assess fit from the extracted profile.
   `confidence_score` is clamped to an integer 0-100 and `improvement_tips`
@@ -440,9 +487,12 @@ recorded). Legacy body:
   "stage": "MVP",
   "challenges": ["Customer acquisition cost is high"],
   "team_gaps": ["No dedicated CTO"],
-  "geography": "New York, NY"
+  "geography": "New York, NY",
+  "sectors": ["FinTech"]
 }
 ```
+
+`sectors` is optional (older clients omit it; `domain` is then used alone).
 
 - Response `200`:
   ```json
@@ -459,12 +509,16 @@ recorded). Legacy body:
         "email": "ava.chen@mentors.mentora.dev",
         "geography": "San Francisco, CA",
         "similarity": 0.8231,
+        "reasons": ["Customer acquisition cost is high → Customer discovery and product-market fit"],
         "status": "suggested",
         "replacement_for": null
       }
     ]
   }
   ```
+- `reasons` (possibly empty) lists up to 3 "startup need → mentor skill"
+  pairs behind the match, best first (see "Scoring / matching details").
+  The frontend shows them as "Why this match" on each card.
 - Matches are keyed on the pair **(startup, mentor)**: one live document
   per pair (`active: true`, partial unique index). A mentor already matched
   keeps its document, `match_id` and status (e.g. `accepted`) and only gets
@@ -667,7 +721,8 @@ Auth: required, `role` must be `mentor` (else `403`). Body:
   "past_exits": "Exited Series B SaaS startup in 2021",
   "preferred_stages": ["MVP", "growth"],
   "max_startups_per_month": "2",
-  "availability": "Weekends"
+  "availability": "Weekends",
+  "skills": ["Seed fundraising", "Enterprise B2B sales", "Hiring a first engineering team"]
 }
 ```
 
@@ -678,13 +733,18 @@ HealthTech, AgriTech, SaaS, D2C, DeepTech, Logistics, Others;
 (≥ 1) ⊆ `idea`, `MVP`, `growth`, `all`; `max_startups_per_month` ∈ `1`,
 `2`, `3`, `5+`; `availability` ∈ Weekdays, Weekends, Flexible.
 `linkedin_url` (optional) must be http(s); `bio` and `past_exits` are
-optional, max 300 characters.
+optional, max 300 characters. `skills` (optional, default `[]`) holds at
+most 15 functional skills of at most 80 characters each (blank entries
+and duplicates are dropped).
 
-The mentor document gets `domain = sector_expertise[0]`,
-`expertise = sector_expertise`, `stage_focus` = the single chosen stage
-(or `all`), a fresh embedding (bio / past exits / experience included in
-the embedded text), and `onboarding_completed: true`; the profile is
-mirrored onto `users.profile`.
+The mentor document gets `domain = sector_expertise[0]`, `stage_focus` =
+the single chosen stage (or `all`), `skills` plus one passage embedding
+per skill in `skill_embeddings` (used for need fit), a fresh profile
+embedding (skills / bio / past exits / experience included in the
+embedded text), and `onboarding_completed: true`; the profile is mirrored
+onto `users.profile`. `expertise` is **left unchanged**: onboarding used to
+overwrite it with the sector list, which threw away the mentor's actual
+expertise.
 
 - Response `200`: `{"success": true, "mentor_id": "...", "profile": {...}}`
 - Errors: `401`, `403`, `404` no linked mentor document, `422`, `502`.
@@ -949,32 +1009,149 @@ moves only, legacy names accepted). Legacy statuses map as
   - Both live in `app/services/embeddings.py` (`embed_query` /
     `embed_passage`) so this convention can't drift.
 - Vector search pulls the top 20 raw candidates (`numCandidates` = 200)
-  from Atlas, re-ranks them with the weighted formula below, and returns
-  the top 5.
-- **Weighted formula** (constants at the top of
-  `app/services/mentor_matching.py`; the weights sum to 1.0, so
-  `match_score` is in `[0, 1]`):
+  from Atlas, **pre-filtered** to `listed != false AND active != false`
+  (needs the filter fields in the index, see section 3; documents without
+  the fields pass).
+- **Eligibility** (in Python, after retrieval):
+  - mentors with `onboarding_completed: false` (registered but never
+    onboarded) are dropped; seeded / legacy documents without the flag stay;
+  - **capacity**: a mentor's load is the number of their matches in
+    `CAPACITY_LOAD_STATUSES` (`app/services/matches.py`; today
+    `email_sent`, `accepted`, `meeting_scheduled`) requested in the last 30
+    days (`email_sent_at`, else the match `timestamp`). Mentors whose load
+    has reached `max_startups_per_month` (`"5+"` counts as 8; unset means
+    unlimited) are dropped — unless fewer than 5 mentors would remain, in
+    which case they stay with their score multiplied by **0.5**.
+- The remaining candidates are re-ranked with the weighted formula below
+  and the top 5 are returned.
+- **Weighted formula** (named constants at the top of
+  `app/services/mentor_matching.py`; the weights sum to 1.0 and every term
+  is in `[0, 1]`, so `match_score` is in `[0, 1]`):
 
 ```
-final_score = cosine_score              * 0.50
-            + stage_match               * 0.20
-            + domain_match              * 0.15
-            + geography_match           * 0.05
-            + effectiveness_normalized  * 0.10
+final_score = 0.35 * similarity
+            + 0.22 * need_fit
+            + 0.15 * domain_match
+            + 0.12 * stage_match
+            + 0.05 * geography_match
+            + 0.11 * effectiveness
+            (x 0.5 for an at-capacity mentor kept by the fallback)
 ```
 
-  - `cosine_score` — the raw `$vectorSearch` score, clamped to `[0, 1]`.
+  - `similarity` — **calibrated** profile similarity. Atlas reports
+    `vectorSearchScore = (1 + cos) / 2` for a cosine index, which squeezes
+    every candidate into ~0.75–0.90; we undo it (`cos = 2s − 1`) and
+    stretch `sim = clamp((cos − 0.53) / (0.84 − 0.53), 0, 1)`. Both
+    constants (`COS_FLOOR`, `COS_CEIL`) were fitted on the eval set as the
+    5th percentile and the maximum of all candidate cosines; re-fit them if
+    the embedding model or the profile text templates change. The
+    response's `similarity` field stays the raw (clamped) Atlas score.
+  - `need_fit` — how well the mentor's **skills** cover what the startup
+    needs: each challenge and team gap is embedded on the query side
+    (`embed_queries`), compared with every skill embedding
+    (`skill_embeddings`, passage side), the per-pair cosine is calibrated
+    with its own fitted constants (`SKILL_COS_FLOOR` 0.34 / `SKILL_COS_CEIL`
+    0.75, the 5th / 99th percentile of each need's best-skill cosine), and
+    `need_fit` is the mean over needs of the best skill. The best pairs (up
+    to 3, calibrated similarity ≥ 0.5) are returned as `reasons`. A mentor
+    without skills gets a neutral 0.3 (the eval-set median); legacy
+    documents without `skills` use their non-sector `expertise` entries.
+  - `domain_match` — 1.0 if **any** of the startup's `sectors` (or its
+    `domain`) overlaps **any** of the mentor's `sector_expertise` or
+    `domain`, after `canonical_domain()` maps both sides onto the onboarding
+    vocabulary (Climate Tech → Clean Energy, AI/ML → DeepTech, E-commerce →
+    D2C, InsurTech → FinTech, Supply Chain → Logistics, …). `Others` never
+    counts as a match.
   - `stage_match` — 1.0 if `mentor.stage_focus == startup.stage`, or the
     startup's stage is in `mentor.preferred_stages`, or the mentor covers
     `all` stages (all case-insensitive), else 0.0.
-  - `domain_match` — 1.0 if `mentor.domain == startup.domain`
-    (case-insensitive), else 0.0.
-  - `geography_match` — 1.0 if both sides have a geography and they match
-    (case-insensitive), else 0.0.
-  - `effectiveness_normalized` — `(mentor.effectiveness_score or 0) / 5`,
-    so mentors with no feedback yet contribute 0. This is the feedback
-    loop: `POST /feedback` raises or lowers a mentor's average rating,
-    which changes their ranking on subsequent matches.
+  - `geography_match` — 1.0 for the same city after alias normalisation
+    (`Bengaluru`, `Bangalore, India` → `bangalore`; `Gurugram`, `New Delhi`
+    → `delhi`; `NYC` → `new york`; only the part before the first comma
+    counts), 0.5 if either side is `Remote`, else 0 (also when either side
+    is missing or `Other`).
+  - `effectiveness` — a **Bayesian average** of the ratings from feedback
+    where the startup attended: `(3 × 3.5 + Σ rating) / (3 + n)`, mapped
+    from 1–5 onto 0–1 as `(r − 1) / 4`. A new mentor therefore starts at a
+    neutral 0.625 instead of 0, and a single 1-star rating (→ 0.47) moves
+    them a little rather than sinking them. Computed per request with one
+    aggregation over the `feedback` collection; `POST /feedback` and its
+    response (`new_effectiveness_score`, the plain average) are unchanged.
+    This is the feedback loop.
+
+## Matching evaluation
+
+`scripts/eval_matching.py` runs the real pipeline (BGE embeddings, Atlas
+`$vectorSearch`, the re-rank) for every profile in
+`tests/fixtures/eval_set.json` and prints P@5, graded nDCG@5, MRR and the
+top-1 − top-5 score spread (mean and std over profiles) next to the runs
+stored in `tests/fixtures/eval_baseline.json`. It only reads, and refuses
+the shared `mentora` database without `--allow-prod-db`:
+
+```bash
+MONGODB_DB_NAME=mentora_staging venv/bin/python scripts/eval_matching.py -v
+#   --save-baseline        overwrite the stored baseline
+#   --record NAME          store this run as runs[NAME]
+#   --set COS_FLOOR=0.5    try a different module constant for one run
+#   --drop-geography       ignore the profiles' geography
+```
+
+**The eval set** has 32 startup profiles: GreenHaul and SkillBridge
+extracted for real from `test_decks/` with the pre-Phase-4 extraction
+prompt, plus 30 hand-written profiles across all onboarding sectors (and
+Gaming / InsurTech / free-text labels), all three stages and Indian and
+international cities. Relevance is graded 0–2 and keyed by the 15 seeded
+mentors' emails; other mentors (real accounts) are unjudged and removed
+from the ranking before scoring, and a seeded mentor whose email was
+changed in the database is still recognised by its seed name.
+
+**Labelling rubric** (also stored in the fixture). For each profile the
+labeller hand-assigns the startup's sectors and the seed expertise areas
+its challenges / team gaps call for (`need_tags`), using the seed mentors'
+pre-Phase-4 `domain`, `stage_focus` and `expertise` only (not the new
+`skills`). With stage distance d (0 same, 1 adjacent, 2 idea↔growth) and N
+the mentor's expertise areas among the need tags:
+grade **2** = same sector and (d = 0 and N ≥ 1, or d = 1 and N ≥ 2);
+grade **1** = any other same-sector mentor, or another sector with N ≥ 2
+and d ≤ 1; otherwise **0**. Two hand overrides carry a written reason.
+P@5 counts grade ≥ 1 as relevant, MRR looks for the first grade-2 mentor,
+nDCG uses gain 2^grade − 1.
+
+> These are **synthetic labels written by a developer**, not coordinator
+> judgements, and the rubric uses the same kinds of signals as the scorer
+> (sector, stage, expertise), so the absolute numbers flatter the system.
+> Use them to compare changes against each other. Replace them with
+> coordinator-graded matches as soon as a pilot produces some.
+
+**Results** on `mentora_staging` (17 mentors: the 15 seeded plus 2 real
+accounts), each step measured on top of the previous one:
+
+| Run | P@5 | nDCG@5 | MRR | spread mean | spread std |
+|---|---|---|---|---|---|
+| baseline (code before Phase 4) | 0.569 | 0.714 | 0.806 | 0.146 | 0.088 |
+| + similarity calibration | 0.638 | 0.788 | 0.839 | 0.263 | 0.132 |
+| + new weights, need fit off | 0.663 | 0.836 | 0.890 | 0.223 | 0.106 |
+| + need fit (skills, re-embedded mentors) | 0.675 | 0.846 | 0.894 | 0.266 | 0.129 |
+| + any-sector domain match | 0.688 | 0.858 | 0.894 | 0.271 | 0.125 |
+| + listed/active/onboarding/capacity filters | 0.688 | 0.858 | 0.894 | 0.271 | 0.125 |
+| + Bayesian effectiveness | 0.688 | 0.858 | 0.894 | 0.271 | 0.125 |
+| **final** (+ geography aliases / remote) | **0.694** | **0.861** | **0.894** | **0.271** | 0.120 |
+
+Notes:
+- The filters and the Bayesian effectiveness are neutral here by
+  construction (staging has no feedback and every judged mentor is listed,
+  onboarded and below capacity); they are kept for correctness, and are
+  covered by unit tests instead.
+- Geography is neutral on this set (`--drop-geography` gives nDCG 0.862):
+  the labels ignore location. It is kept as the small 0.05 term the plan
+  calls for, because co-location matters for in-person mentoring.
+- Ablations on the final formula (one weight set to 0): need fit off →
+  nDCG 0.855; domain off → 0.753; stage off → **0.898** (MRR 0.930). The
+  binary stage term costs ranking quality on this set because the rubric
+  gives partial credit to adjacent stages; a graded stage match (adjacent
+  = 0.5) is the obvious next experiment once real labels exist.
+- GreenHaul's top match stays Clean Energy (`Mentor 2`, then Ravi
+  Deshmukh and Chloe Dubois, both Climate Tech).
 
 ## Security notes
 
@@ -1036,7 +1213,7 @@ mentora-backend/
       mailer.py               # Gmail SMTP / log delivery + `outbox` audit trail
       google_calendar.py      # Google OAuth flow, token refresh, Meet event creation
       health.py               # health score formula + trend
-      evaluation.py           # precision/recall/MRR/NDCG metric functions
+      evaluation.py           # precision/recall/MRR/NDCG (binary + graded) metric functions
       auth.py                 # bcrypt hashing + JWT issue/verify
       auth_dependency.py      # get_current_user (JWT) + get_principal (user doc + tenancy)
       tenancy.py              # orgs/cohorts, invite tokens (sha256), atomic redemption, cohort scoping
@@ -1046,10 +1223,15 @@ mentora-backend/
     db/
       mongo.py                # pymongo client setup + ensure_indexes()
   tests/                       # offline pytest suite (mongomock, patched Groq)
+    fixtures/eval_set.json     # graded matching eval set (synthetic labels)
+    fixtures/eval_baseline.json # eval results: baseline + one run per change
   scripts/
     create_org.py              # bootstrap an org + cohort + first coordinator invite
     migrate_v2.py              # idempotent tenancy + lifecycle backfill (--dry-run)
-  seed_mentors.py              # seeds 15 mentor profiles + embeddings
+    eval_matching.py           # offline matching eval (P@5, nDCG@5, MRR, spread)
+    backfill_mentor_skills.py  # in-place skills + skill embeddings + re-embed
+    update_vector_index.py     # create/update the Atlas vector index definition
+  seed_mentors.py              # seeds 15 mentor profiles + skills + embeddings
   requirements.txt
   .env.example
   README.md

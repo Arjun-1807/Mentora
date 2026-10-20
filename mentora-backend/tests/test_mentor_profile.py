@@ -65,7 +65,12 @@ def test_success_updates_mentor_and_user_and_reembeds(client, fake_mongo, monkey
     assert doc["embedding"] == [0.5] * 768
     assert doc["name"] == "Ada Lovelace"
     assert doc["domain"] == "FinTech"
-    assert doc["expertise"] == ["FinTech", "SaaS"]
+    # Onboarding no longer overwrites expertise with the sector list: the
+    # registration value (MENTOR_PAYLOAD) is kept; sectors stay separate.
+    assert doc["expertise"] == ["Fundraising"]
+    assert doc["sector_expertise"] == ["FinTech", "SaaS"]
+    assert doc["skills"] == []
+    assert doc["skill_embeddings"] == []
     assert doc["preferred_stages"] == ["MVP"]
     assert doc["geography"] == "Bangalore"
     assert doc["email"] == MENTOR_PAYLOAD["email"]
@@ -74,6 +79,38 @@ def test_success_updates_mentor_and_user_and_reembeds(client, fake_mongo, monkey
     user = _db(fake_mongo)[settings.MONGODB_USERS_COLLECTION].find_one({"_id": ObjectId(me["user_id"])})
     assert user["profile"]["name"] == "Ada Lovelace"
     assert user["profile"]["availability"] == "Weekends"
+
+
+def test_skills_are_stored_with_one_embedding_each_and_embedded_in_profile_text(
+    client, fake_mongo, monkeypatch, mentor
+):
+    from app.routers import mentor as mentor_router
+
+    embedded = []
+    monkeypatch.setattr(mentor_router, "embed_passage", lambda text: embedded.append(text) or [0.5] * 768)
+    monkeypatch.setattr(mentor_router, "embed_passages", lambda texts: [[float(i)] * 768 for i, _ in enumerate(texts)])
+
+    token, me = mentor
+    payload = {**VALID, "skills": ["Seed fundraising", " B2B sales ", "Seed fundraising", ""]}
+    response = client.patch("/mentor/profile", json=payload, headers=auth_header(token))
+    assert response.status_code == 200, response.text
+    assert response.json()["profile"]["skills"] == ["Seed fundraising", "B2B sales"]
+    assert "Skills: Seed fundraising, B2B sales." in embedded[0]
+
+    doc = _db(fake_mongo)[settings.MONGODB_MENTORS_COLLECTION].find_one({"_id": ObjectId(me["mentor_id"])})
+    assert doc["skills"] == ["Seed fundraising", "B2B sales"]
+    assert doc["skill_embeddings"] == [[0.0] * 768, [1.0] * 768]
+    assert doc["expertise"] == ["Fundraising"]
+
+
+@pytest.mark.parametrize(
+    "skills",
+    [["x" * 81], [f"skill {i}" for i in range(16)], [1, 2]],
+)
+def test_invalid_skills_are_rejected(client, mentor, skills):
+    token, _ = mentor
+    response = client.patch("/mentor/profile", json={**VALID, "skills": skills}, headers=auth_header(token))
+    assert response.status_code == 422
 
 
 @pytest.mark.parametrize(

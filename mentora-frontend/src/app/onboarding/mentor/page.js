@@ -29,6 +29,7 @@ import {
   SECTOR_OPTIONS,
   STAGE_OPTIONS,
   normalizeStages,
+  parseSkills,
   sectorLabel,
   toMentorProfilePayload,
   validateOnboardingStep,
@@ -52,6 +53,7 @@ const EMPTY_FORM = {
   sectorExpertise: [],
   yearsExperience: "",
   pastExits: "",
+  skills: "",
   preferredStages: [],
   maxStartupsPerMonth: "",
   availability: "",
@@ -78,6 +80,7 @@ function formFromProfile(profile = {}) {
       .filter((s) => SECTOR_OPTIONS.includes(s)),
     yearsExperience: pick(profile.years_experience, EXPERIENCE_OPTIONS),
     pastExits: typeof profile.past_exits === "string" ? profile.past_exits : "",
+    skills: parseSkills(profile.skills).join(", "),
     preferredStages: stages.filter((s) => stageValues.includes(s)),
     maxStartupsPerMonth: pick(String(profile.max_startups_per_month ?? ""), CAPACITY_OPTIONS),
     availability: pick(profile.availability, AVAILABILITY_OPTIONS),
@@ -215,6 +218,28 @@ function StepExpertise({ form, update, errors }) {
         />
         <FieldError id="onboarding-exits-error" message={errors.pastExits} />
       </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="onboarding-skills">
+          Skills <span className="font-normal text-muted-foreground">(optional, comma-separated)</span>
+        </Label>
+        <Input
+          id="onboarding-skills"
+          className="h-10"
+          placeholder="e.g. Seed fundraising, Enterprise sales, Hiring engineers"
+          value={form.skills}
+          onChange={(e) => update("skills", e.target.value)}
+          aria-invalid={Boolean(errors.skills) || undefined}
+          aria-describedby={errors.skills ? "onboarding-skills-error" : "onboarding-skills-hint"}
+        />
+        {errors.skills ? (
+          <FieldError id="onboarding-skills-error" message={errors.skills} />
+        ) : (
+          <p id="onboarding-skills-hint" className="text-xs text-muted-foreground">
+            We match these against startups&rsquo; challenges and team gaps.
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -346,6 +371,9 @@ function StepReview({ form, goTo }) {
           {form.yearsExperience && `${form.yearsExperience} years`}
         </SummaryRow>
         <SummaryRow label="Past exits">{form.pastExits.trim()}</SummaryRow>
+        <SummaryRow label="Skills">
+          {parseSkills(form.skills).length > 0 && <BadgeList items={parseSkills(form.skills)} />}
+        </SummaryRow>
       </SummarySection>
       <SummarySection title="Startup Preferences" step={3} onEdit={goTo}>
         <SummaryRow label="Stages">

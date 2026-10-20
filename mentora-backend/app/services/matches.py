@@ -131,6 +131,12 @@ def status_in(statuses: Iterable[str]) -> Dict[str, Any]:
     return {"$in": stored_statuses(statuses)}
 
 
+# Statuses that occupy a mentor's monthly capacity (mentor_matching's
+# capacity filter): the startup actually sent a request, and the engagement
+# is not finished yet. Query with `status_in()` so legacy `email_sent` counts.
+CAPACITY_LOAD_STATUSES: List[str] = [REQUESTED, ACCEPTED, MEETING_SCHEDULED]
+
+
 # Documents that should appear in listings / counts: not superseded and not a
 # de-duplicated legacy copy of another match.
 VISIBLE_FILTER: Dict[str, Any] = {"status": {"$ne": SUPERSEDED}, "duplicate_of": {"$exists": False}}
