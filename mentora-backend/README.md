@@ -40,6 +40,9 @@ with feedback that feeds back into ranking.
 - `/health/*` — startup health score from post-meeting outcomes, plus a
   coordinator cohort view.
 - Roles: `startup`, `mentor` and `coordinator` (incubator staff).
+- Tenancy: organizations → cohorts, invite links (`/invites/*`,
+  `/cohorts/{id}/invites`, `/orgs/me`). Coordinators are invite-only and
+  scoped to their own cohorts. See "Tenancy" below.
 
 ## 1. Install dependencies
 
@@ -203,6 +206,11 @@ failures are logged rather than fatal.
 | `oauth_states` | `created_at` (TTL 15 min) | no | Abandoned OAuth states expire on their own (the callback also checks the age). |
 | `meeting_notes` | `startup_id, timestamp` | no | Last-5-notes health score computation. |
 | `meeting_notes` | `match_id` | no | Per-match note lookups. |
+| `users` | `cohort_ids` | no | Coordinator cohort scoping. |
+| `organizations` | `slug` | yes | One org per slug (`legacy` is built in). |
+| `cohorts` | `org_id, name` | yes | One cohort per name within an org. |
+| `invites` | `token_hash` | yes | Invite lookup by sha256 of the token. |
+| `invites` | `cohort_id, created_at` | no | Coordinator invite listing. |
 
 ## 5. Seed the mentors collection
 
@@ -283,6 +291,18 @@ Auth: none. Body:
   limit — longer passwords are rejected with `422` rather than 500-ing).
 - `role`: `"startup"`, `"mentor"` or `"coordinator"` (incubator staff;
   no profile needed — coordinators see `GET /health/cohort`).
+- `invite_token` (optional): the token from a `/join/<token>` link. The
+  user joins the invite's org/cohort (`org_id`, `cohort_id`, `cohort_ids`
+  on the user). The invite's `role` must equal `role` (`400` otherwise),
+  an email-bound invite must match `email` (`403`), and an unknown token
+  is `404` while a revoked, expired or used-up one is `410`. Redeeming is
+  one atomic `find_one_and_update`, and the use is given back if the
+  registration then fails. A mentor invite with a `mentor_id` **claims**
+  that existing (e.g. seeded) mentor document instead of creating one, and
+  no profile is needed.
+- **Coordinators require a coordinator invite**: without one, `403`.
+  Startups and mentors without an invite land in the `legacy` org's
+  `default` cohort.
 - For `role: "mentor"`, `profile` is validated and requires only a
   `name` and at least one `sector_expertise` entry (a list, or a
   comma-separated string):
@@ -323,7 +343,10 @@ Auth: required. Response `200`:
   "profile": {},
   "mentor_id": null,
   "created_at": "2026-01-01T00:00:00+00:00",
-  "calendar_connected": false
+  "calendar_connected": false,
+  "org_id": "6660...",
+  "cohort_id": "6661...",
+  "cohort_ids": ["6661..."]
 }
 ```
 
@@ -706,14 +729,65 @@ compares the new score with the previous history entry: `up` if ≥ +5,
   `health_trend`, `health_updated_at` and appends to `health_history`;
   adds the submitter's role to the match's `health_logged_by`. `422` for
   out-of-range scores, `404` unknown match.
-- **`GET /health/cohort`** (coordinator only) →
+- **`GET /health/cohort`** (coordinator only; only the startups in the
+  coordinator's own `cohort_ids`, with users that predate tenancy counted
+  as `legacy/default`) →
   `{"startups": [{"user_id", "email", "domain", "stage", "health_score"|null, "trend", "match_count", "meeting_count", "last_activity"|null, "health_history": [{"score", "timestamp"}]}]}`
   — `domain`/`stage` from the startup's latest match profile,
   `meeting_count` = matches at `meeting_scheduled`/`completed`,
   `health_history` = last 10 points; sorted lowest score first.
-- **`GET /health/{startup_id}`** (auth; the startup itself, a coordinator,
-  or a mentor matched with that startup; `me` = the caller) →
+- **`GET /health/{startup_id}`** (auth; the startup itself, a coordinator
+  of one of its cohorts, or a mentor matched with that startup; `me` = the
+  caller) →
   `{"health_score"|null, "trend", "health_history": [...last 10], "last_updated"|null}`.
+
+### Tenancy (organizations, cohorts, invites)
+
+Collections: `organizations {slug, name, timezone}`,
+`cohorts {org_id, name, status, coordinator_user_ids}`,
+`invites {token_hash, org_id, cohort_id, role, email?, mentor_id?, max_uses, uses, expires_at, revoked_at, created_by, redeemed_by[]}`.
+Only the sha256 of an invite token is stored. Role and tenancy are read
+from the user document on every request (`get_principal` in
+`services/auth_dependency.py`), so a role change takes effect even for a
+JWT minted earlier. Users without an `org_id` fall back to `legacy/default`.
+
+- **`GET /orgs/me`** (auth) →
+  `{"org": {"org_id", "slug", "name", "timezone"}, "cohorts": [{"cohort_id", "name", "status"}]}`.
+- **`POST /cohorts/{cohort_id}/invites`** (coordinator of that cohort; `403`
+  otherwise) body `{"role", "email"?, "mentor_id"?, "max_uses"?, "expires_in_days"?}`
+  → `201` with the invite plus its one-time `token` and `url`. `startup`
+  invites are multi-use links (`max_uses` default `INVITE_LINK_DEFAULT_MAX_USES`=100,
+  TTL `INVITE_LINK_TTL_DAYS`=30). `mentor` and `coordinator` invites require
+  `email` and are single-use (TTL `INVITE_EMAIL_TTL_DAYS`=14). `mentor_id`
+  (mentor invites only) must be an unclaimed mentor (`404`/`409`).
+- **`GET /cohorts/{cohort_id}/invites`** (coordinator of that cohort) →
+  `{"invites": [{"invite_id", "role", "email", "mentor_id", "max_uses", "uses", "expires_at", "revoked_at", "created_at", "status"}]}`,
+  where `status` is `active`, `used`, `expired` or `revoked`. Tokens are never listed.
+- **`DELETE /invites/{invite_id}`** (coordinator of the invite's cohort,
+  `404` otherwise) revokes an invite. It is idempotent, and accounts already
+  created with it are unaffected.
+- **`GET /invites/{token}`** (public) →
+  `{"org_name", "org_slug", "cohort_name", "role", "email"|null, "mentor_name"|null, "expires_at"}`.
+  It returns `404` for an unknown token and `410` for a revoked, expired or used one.
+- `GET /mentors` items carry `claimed` (the mentor document has a user account).
+
+Mentor documents gain `visibility {scope: "global"|"orgs", org_ids}`, `listed`
+and `active`. New mentors default to global, listed and active. Matching
+does not filter on these yet.
+
+Scripts (run from `mentora-backend/`; both accept `--db <name>` to override
+`MONGODB_DB_NAME`):
+
+- `scripts/create_org.py --slug --name [--cohort] [--timezone] --coordinator-email [--expires-days] [--base-url]`
+  creates (or reuses) the org and cohort and prints a single-use coordinator
+  invite URL.
+- `scripts/migrate_v2.py [--dry-run] [--confirm <db>] [--keep-coordinators a@x,b@y]`
+  is idempotent. It creates `legacy/default`, backfills `org_id`,
+  `cohort_id` and `cohort_ids` on users, demotes self-registered
+  coordinators (no `invite_id`) to `startup` unless kept, backfills the
+  mentor `visibility`, `listed` and `active` fields, and then runs
+  `ensure_indexes()`. A real run requires `--confirm` to equal the target
+  database name. Run `mongodump` first.
 
 ### `GET /` and `GET /health`
 
@@ -830,6 +904,7 @@ mentora-backend/
       calendar.py             # /calendar/* (Google OAuth, availability, booking)
       health.py               # /health/log, /health/cohort, /health/{startup_id}
       stats.py                # GET /dashboard/stats, GET /mentor/stats
+      orgs.py                 # /orgs/me, /cohorts/{id}/invites, /invites/* (tenancy)
     services/
       pdf_extract.py          # PyMuPDF text extraction + size cap
       llm.py                  # Groq profile extraction + deck feedback (prompt + JSON validation)
@@ -841,13 +916,17 @@ mentora-backend/
       health.py               # health score formula + trend
       evaluation.py           # precision/recall/MRR/NDCG metric functions
       auth.py                 # bcrypt hashing + JWT issue/verify
-      auth_dependency.py      # get_current_user bearer-token dependency
+      auth_dependency.py      # get_current_user (JWT) + get_principal (user doc + tenancy)
+      tenancy.py              # orgs/cohorts, invite tokens (sha256), atomic redemption, cohort scoping
       rate_limit.py           # in-process sliding-window rate limiting
     models/
       schemas.py              # Pydantic request/response models
     db/
       mongo.py                # pymongo client setup + ensure_indexes()
   tests/                       # offline pytest suite (mongomock, patched Groq)
+  scripts/
+    create_org.py              # bootstrap an org + cohort + first coordinator invite
+    migrate_v2.py              # idempotent tenancy backfill (--dry-run)
   seed_mentors.py              # seeds 15 mentor profiles + embeddings
   requirements.txt
   .env.example

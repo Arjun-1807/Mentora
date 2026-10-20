@@ -17,7 +17,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
 from app.db.mongo import ensure_indexes
-from app.routers import auth, calendar, email, evaluate, extract, feedback, health, match, mentor, stats
+from app.routers import auth, calendar, email, evaluate, extract, feedback, health, match, mentor, orgs, stats
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +131,7 @@ app.include_router(evaluate.router)
 app.include_router(calendar.router)
 app.include_router(health.router)
 app.include_router(stats.router)
+app.include_router(orgs.router)
 
 
 @app.get("/", tags=["health"])

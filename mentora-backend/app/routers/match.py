@@ -158,6 +158,7 @@ async def list_mentors(
             email=doc.get("email"),
             effectiveness_score=doc.get("effectiveness_score"),
             feedback_count=int(doc.get("feedback_count") or 0),
+            claimed=bool(doc.get("user_id")),
         )
         for doc in docs
     ]

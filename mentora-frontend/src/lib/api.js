@@ -40,6 +40,7 @@ export function forceLogout({ redirect = true } = {}) {
 
   const { pathname, search } = window.location;
   if (pathname === "/login" || pathname === "/register" || pathname === "/") return;
+  if (pathname.startsWith("/join/")) return;
 
   logoutPending = true;
   setTimeout(() => {
@@ -280,7 +281,11 @@ export function login(email, password) {
   });
 }
 
-/** Registers a new user (startup, mentor or coordinator), returns a JWT. */
+/**
+ * Registers a new user, returns a JWT. Pass `invite_token` (from a
+ * /join/<token> link) to join that invite's org/cohort; coordinators can
+ * only register with a coordinator invite.
+ */
 export function register(payload) {
   return request("/register", {
     method: "POST",
@@ -450,7 +455,56 @@ export function getHealth(startupId = "me") {
   return request(`/health/${encodeURIComponent(startupId || "me")}`, { method: "GET" });
 }
 
-/** Coordinator view of every startup's health: `{startups: [...]}`. */
+/** Coordinator view of the startups in their cohorts: `{startups: [...]}`. */
 export function getCohortHealth() {
   return request("/health/cohort", { method: "GET" });
+}
+
+/* ---------------------------------------------------------------- tenancy */
+
+/**
+ * Public preview of an invite for the /join page:
+ * `{org_name, org_slug, cohort_name, role, email|null, mentor_name|null, expires_at}`.
+ * Rejects with status 404 (unknown) or 410 (revoked / expired / used up).
+ */
+export function getInvitePreview(token) {
+  return request(`/invites/${encodeURIComponent(token)}`, {
+    method: "GET",
+    skipAuth: true,
+    redirectOn401: false,
+  });
+}
+
+/** The caller's org and cohorts: `{org: {org_id, slug, name, timezone}, cohorts: [{cohort_id, name, status}]}`. */
+export function getMyOrg() {
+  return request("/orgs/me", { method: "GET" });
+}
+
+/** Invites of one of the coordinator's cohorts, newest first: `{invites: [...]}`. */
+export function listCohortInvites(cohortId) {
+  return request(`/cohorts/${encodeURIComponent(cohortId)}/invites`, { method: "GET" });
+}
+
+/**
+ * Creates an invite into a cohort (coordinator only).
+ * `{role: "startup"}` -> multi-use cohort link; `{role: "mentor", email, mentor_id?}`
+ * and `{role: "coordinator", email}` -> single-use, bound to that email.
+ * Resolves to the invite plus its one-time `token` and `url`.
+ */
+export function createCohortInvite(cohortId, payload) {
+  return request(`/cohorts/${encodeURIComponent(cohortId)}/invites`, {
+    method: "POST",
+    body: payload,
+  });
+}
+
+/** Revokes an invite (idempotent); resolves to the updated invite. */
+export function revokeInvite(inviteId) {
+  return request(`/invites/${encodeURIComponent(inviteId)}`, { method: "DELETE" });
+}
+
+/** The shareable join link for a raw invite token, on this frontend's origin. */
+export function joinUrl(token) {
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  return `${origin}/join/${encodeURIComponent(token)}`;
 }

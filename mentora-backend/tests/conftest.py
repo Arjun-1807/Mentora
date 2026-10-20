@@ -171,3 +171,24 @@ def insert_match(fake_mongo, *, user_id: str, mentor_id: str, status: str = "pen
     doc.update(fields)
     fake_mongo[settings.MONGODB_DB_NAME][settings.MONGODB_MATCHES_COLLECTION].insert_one(doc)
     return doc
+
+
+def coordinator_invite(email: str = COORDINATOR_PAYLOAD["email"], cohort_id: str = None) -> str:
+    """Create a coordinator invite (legacy default cohort unless given) and
+    return its raw token. Coordinators can only register with one."""
+    from app.db.mongo import get_cohorts_collection
+    from app.services import tenancy
+
+    if cohort_id is None:
+        org_id, cohort_id = tenancy.ensure_legacy_org()
+    else:
+        org_id = get_cohorts_collection().find_one({"_id": tenancy.object_id(cohort_id)})["org_id"]
+    token, _ = tenancy.create_invite(org_id=org_id, cohort_id=cohort_id, role="coordinator", email=email)
+    return token
+
+
+def register_coordinator(client, payload: dict = None, cohort_id: str = None) -> str:
+    """Register a coordinator through an invite and return their bearer token."""
+    payload = payload or COORDINATOR_PAYLOAD
+    token = coordinator_invite(payload["email"], cohort_id)
+    return register(client, {**payload, "invite_token": token})
