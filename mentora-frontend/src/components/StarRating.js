@@ -1,6 +1,7 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
+import { motion } from "framer-motion";
 import { Star } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -11,7 +12,8 @@ const VALUES = [1, 2, 3, 4, 5];
  *
  * Roving tabindex: exactly one star is in the tab order, arrow keys move
  * between stars (and select, as a radio group should), Home/End jump to the
- * ends, and each star is labelled for screen readers.
+ * ends, and each star is labelled for screen readers. Hovering previews the
+ * rating; each star springs on hover and pops when it becomes selected.
  */
 export function StarRating({
   value = 0,
@@ -21,6 +23,7 @@ export function StarRating({
   id,
 }) {
   const containerRef = useRef(null);
+  const [hovered, setHovered] = useState(0);
 
   function select(next) {
     const clamped = Math.min(5, Math.max(1, next));
@@ -59,6 +62,8 @@ export function StarRating({
   // With nothing selected, the first star holds the tab stop.
   const tabStop = value >= 1 && value <= 5 ? value : 1;
 
+  const shown = !disabled && hovered ? hovered : value;
+
   return (
     <div
       ref={containerRef}
@@ -67,12 +72,14 @@ export function StarRating({
       aria-label={label}
       aria-disabled={disabled || undefined}
       onKeyDown={handleKeyDown}
-      className="flex items-center gap-1"
+      onPointerLeave={() => setHovered(0)}
+      className="flex items-center gap-0.5"
     >
       {VALUES.map((n) => {
-        const filled = n <= value;
+        const filled = n <= shown;
+        const preview = Boolean(hovered) && !disabled && n <= hovered && n > value;
         return (
-          <button
+          <motion.button
             key={n}
             type="button"
             data-star={n}
@@ -82,23 +89,43 @@ export function StarRating({
             tabIndex={n === tabStop ? 0 : -1}
             disabled={disabled}
             onClick={() => !disabled && onChange?.(n)}
+            onPointerEnter={() => !disabled && setHovered(n)}
+            whileHover={disabled ? undefined : { scale: 1.18, rotate: -6 }}
+            whileTap={disabled ? undefined : { scale: 0.88 }}
+            transition={{ type: "spring", stiffness: 500, damping: 18 }}
             className={cn(
-              "p-1 outline-none transition-colors",
-              "focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:border focus-visible:border-ring",
-              disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
+              "rounded-lg p-1 outline-none",
+              "focus-visible:ring-3 focus-visible:ring-ring/50",
+              disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"
             )}
           >
-            <Star
-              aria-hidden="true"
-              className={cn(
-                "h-5 w-5",
-                filled ? "fill-primary text-primary" : "text-muted-foreground"
-              )}
-            />
-          </button>
+            <motion.span
+              className="flex"
+              // Re-keyed on selection so the chosen star (and those below it) pop.
+              key={filled && !preview ? `on-${value}` : "off"}
+              initial={filled && !preview ? { scale: 0.6 } : false}
+              animate={{ scale: 1 }}
+              transition={{ type: "spring", stiffness: 600, damping: 14, delay: (n - 1) * 0.03 }}
+            >
+              <Star
+                aria-hidden="true"
+                className={cn(
+                  "size-6 transition-colors duration-150",
+                  filled
+                    ? preview
+                      ? "fill-spark/40 text-spark"
+                      : "fill-spark text-spark drop-shadow-[0_0_6px_color-mix(in_oklch,var(--spark)_45%,transparent)]"
+                    : "text-muted-foreground/60"
+                )}
+              />
+            </motion.span>
+          </motion.button>
         );
       })}
-      <span className="ml-2 text-sm text-muted-foreground" aria-hidden="true">
+      <span
+        className="ml-2 min-w-14 font-mono text-xs tabular-nums text-muted-foreground"
+        aria-hidden="true"
+      >
         {value ? `${value}/5` : "Not rated"}
       </span>
     </div>

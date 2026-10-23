@@ -3,9 +3,20 @@
 import { useEffect, useId, useState } from "react";
 import dynamic from "next/dynamic";
 import { AnimatePresence, motion } from "framer-motion";
-import { ChevronDown, Crosshair, Gauge, Info, ListOrdered, Loader2, Search, Sigma } from "lucide-react";
+import {
+  ChevronDown,
+  Crosshair,
+  FlaskConical,
+  Gauge,
+  Info,
+  ListOrdered,
+  Loader2,
+  Play,
+  Search,
+  Sigma,
+} from "lucide-react";
 import { toast } from "sonner";
-import StatCard from "@/components/ui/StatCard";
+import { CountUp, FadeIn, SpotlightCard, Stagger } from "@/components/motion";
 import { InlineError } from "@/components/StateCard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -22,36 +33,41 @@ import { parseEvaluationInput } from "@/lib/validation";
 // recharts is heavy and only needed once results exist, so load it lazily.
 const MetricsChart = dynamic(() => import("@/components/MetricsChart"), {
   ssr: false,
-  loading: () => <Skeleton className="mt-6 h-64 w-full" />,
+  loading: () => <Skeleton className="h-64 w-full" />,
 });
 
 const METRICS = [
   {
     key: "precision_at_5",
+    tone: "primary",
     label: "Precision@5",
     icon: Crosshair,
     help: "Of the 5 mentors Mentora returned, the share that are on your ground-truth list.",
   },
   {
     key: "recall_at_5",
+    tone: "info",
     label: "Recall@5",
     icon: Search,
     help: "Of all the mentors you marked as right, the share that made it into the top 5.",
   },
   {
     key: "mrr",
+    tone: "spark",
     label: "MRR",
     icon: ListOrdered,
     help: "How high the first correct mentor ranks: 1.0 means it was #1, 0.5 means #2, 0 means none made the top 5.",
   },
   {
     key: "ndcg_at_5",
+    tone: "success",
     label: "NDCG@5",
     icon: Sigma,
     help: "Rewards putting the correct mentors near the top of the list. 1.0 is a perfect ordering.",
   },
   {
     key: "avg_match_score",
+    tone: "warning",
     label: "Avg Score",
     icon: Gauge,
     help: "Average embedding similarity (cosine, 0–1) between the profile and the top 5 mentors.",
@@ -66,6 +82,46 @@ const EXAMPLE_PROFILE = {
   geography: "Bangalore",
 };
 
+const TONES = {
+  primary: "bg-primary/12 text-primary",
+  info: "bg-info/12 text-info",
+  spark: "bg-spark/14 text-spark",
+  success: "bg-success/12 text-success",
+  warning: "bg-warning/12 text-warning",
+};
+
+/** One evaluation metric: icon chip, label + help tooltip, 3-decimal count-up and a 0–1 meter. */
+function MetricTile({ metric, value }) {
+  const Icon = metric.icon;
+  const pct = Math.max(0, Math.min(1, value)) * 100;
+  return (
+    <FadeIn className="h-full">
+      <SpotlightCard className="flex h-full flex-col p-4">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-medium text-muted-foreground">
+            <MetricLabel label={metric.label} help={metric.help} />
+          </span>
+          <span
+            aria-hidden="true"
+            className={cn("flex size-7 items-center justify-center rounded-lg", TONES[metric.tone])}
+          >
+            <Icon className="size-3.5" />
+          </span>
+        </div>
+        <p className="mt-3 text-2xl font-semibold tracking-tight text-foreground">
+          <CountUp value={value} decimals={3} />
+        </p>
+        <div aria-hidden="true" className="mt-3 h-1 overflow-hidden rounded-full bg-muted">
+          <div
+            className="h-full rounded-full bg-current opacity-80 transition-[width] duration-1000 ease-out"
+            style={{ width: `${pct}%`, color: `var(--${metric.tone})` }}
+          />
+        </div>
+      </SpotlightCard>
+    </FadeIn>
+  );
+}
+
 function MetricLabel({ label, help }) {
   return (
     <span className="inline-flex items-center gap-1.5">
@@ -75,7 +131,7 @@ function MetricLabel({ label, help }) {
           render={
             <button
               type="button"
-              className="inline-flex rounded text-muted-foreground outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+              className="inline-flex rounded-full text-muted-foreground outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
               aria-label={`What is ${label}?`}
             />
           }
@@ -91,8 +147,8 @@ function MetricLabel({ label, help }) {
 /**
  * Collapsible retrieval-evaluation panel (POST /evaluate): paste a profile +
  * ground-truth mentor ids, get Precision@5 / Recall@5 / MRR / NDCG@5 / Avg
- * Score as StatCards plus a bar chart. Same logic as RetrievalMetrics, in the
- * dashboard's StatCard style.
+ * Score as animated metric tiles plus a bar chart. Same logic as
+ * RetrievalMetrics, in the dashboard's card style.
  */
 export default function MetricsPanel() {
   const panelId = useId();
@@ -137,21 +193,29 @@ export default function MetricsPanel() {
             onClick={() => setOpen((o) => !o)}
             aria-expanded={open}
             aria-controls={panelId}
-            className="flex w-full items-center justify-between gap-4 rounded text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            className="flex w-full items-center justify-between gap-4 rounded-xl text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
           >
-            <span>
-              <CardTitle>Run an evaluation</CardTitle>
-              <CardDescription className="mt-1">
-                Check how well matching ranks the mentors you know are right for a profile.
-              </CardDescription>
+            <span className="flex items-start gap-3">
+              <span
+                aria-hidden="true"
+                className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/12 text-primary"
+              >
+                <FlaskConical className="size-5" />
+              </span>
+              <span>
+                <CardTitle>Run an evaluation</CardTitle>
+                <CardDescription className="mt-1">
+                  Check how well matching ranks the mentors you know are right for a profile.
+                </CardDescription>
+              </span>
             </span>
-            <ChevronDown
-              className={cn(
-                "h-5 w-5 shrink-0 text-muted-foreground transition-transform duration-200",
-                open && "rotate-180"
-              )}
-              aria-hidden="true"
-            />
+            <motion.span
+              animate={{ rotate: open ? 180 : 0 }}
+              transition={{ type: "spring", stiffness: 400, damping: 28 }}
+              className="flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
+            >
+              <ChevronDown className="size-4" aria-hidden="true" />
+            </motion.span>
           </button>
         </CardHeader>
 
@@ -163,18 +227,22 @@ export default function MetricsPanel() {
               initial={{ height: 0, opacity: 0 }}
               animate={{ height: "auto", opacity: 1 }}
               exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.25, ease: "easeOut" }}
+              transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
               className="overflow-hidden"
             >
               <CardContent>
-                <form onSubmit={handleRun} noValidate className="space-y-4">
+                <form
+                  onSubmit={handleRun}
+                  noValidate
+                  className="grid gap-5 border-t border-border pt-5 lg:grid-cols-[1.4fr_1fr]"
+                >
                   <div className="space-y-1.5">
                     <Label htmlFor="eval-profile">Startup profile (JSON)</Label>
                     <Textarea
                       id="eval-profile"
                       rows={8}
                       spellCheck={false}
-                      className="font-mono text-xs"
+                      className="min-h-52 bg-muted/40 font-mono text-xs leading-relaxed"
                       value={profileJson}
                       onChange={(e) => setProfileJson(e.target.value)}
                       aria-invalid={Boolean(errors.profile) || undefined}
@@ -187,33 +255,43 @@ export default function MetricsPanel() {
                     )}
                   </div>
 
-                  <div className="space-y-1.5">
-                    <Label htmlFor="eval-ids">Ground-truth mentor IDs</Label>
-                    <Input
-                      id="eval-ids"
-                      placeholder="e.g. 66f1c0…, 66f1c1…"
-                      value={idsText}
-                      onChange={(e) => setIdsText(e.target.value)}
-                      aria-invalid={Boolean(errors.ids) || undefined}
-                      aria-describedby={errors.ids ? "eval-ids-error" : "eval-ids-hint"}
-                    />
-                    {errors.ids ? (
-                      <p id="eval-ids-error" role="alert" className="text-xs text-destructive">
-                        {errors.ids}
-                      </p>
-                    ) : (
-                      <p id="eval-ids-hint" className="text-xs text-muted-foreground">
-                        Comma-separated mentor IDs you consider correct matches for this profile.
-                      </p>
-                    )}
+                  <div className="flex flex-col gap-4">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="eval-ids">Ground-truth mentor IDs</Label>
+                      <Input
+                        id="eval-ids"
+                        placeholder="e.g. 66f1c0…, 66f1c1…"
+                        value={idsText}
+                        onChange={(e) => setIdsText(e.target.value)}
+                        aria-invalid={Boolean(errors.ids) || undefined}
+                        aria-describedby={errors.ids ? "eval-ids-error" : "eval-ids-hint"}
+                      />
+                      {errors.ids ? (
+                        <p id="eval-ids-error" role="alert" className="text-xs text-destructive">
+                          {errors.ids}
+                        </p>
+                      ) : (
+                        <p id="eval-ids-hint" className="text-xs text-muted-foreground">
+                          Comma-separated mentor IDs you consider correct matches for this profile.
+                        </p>
+                      )}
+                    </div>
+
+                    {runError && <InlineError message={runError} />}
+
+                    <Button
+                      type="submit"
+                      disabled={running}
+                      className="self-start lg:mt-auto lg:self-stretch"
+                    >
+                      {running ? (
+                        <Loader2 className="animate-spin" aria-hidden="true" />
+                      ) : (
+                        <Play aria-hidden="true" />
+                      )}
+                      {running ? "Evaluating…" : "Run Evaluation"}
+                    </Button>
                   </div>
-
-                  {runError && <InlineError message={runError} />}
-
-                  <Button type="submit" disabled={running}>
-                    {running && <Loader2 className="animate-spin" aria-hidden="true" />}
-                    {running ? "Evaluating…" : "Run Evaluation"}
-                  </Button>
                 </form>
               </CardContent>
             </motion.div>
@@ -221,36 +299,41 @@ export default function MetricsPanel() {
         </AnimatePresence>
       </Card>
 
-      {results && (
-        <section aria-live="polite" aria-label="Evaluation results" className="space-y-6">
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-            {METRICS.map((m) => {
-              const Icon = m.icon;
-              return (
-                <StatCard
-                  key={m.key}
-                  icon={<Icon />}
-                  label={<MetricLabel label={m.label} help={m.help} />}
-                  // Fixed 3 decimals so the five cards line up.
-                  value={Number(results[m.key] ?? 0).toFixed(3)}
+      <AnimatePresence>
+        {results && (
+          <motion.section
+            key="results"
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+            aria-live="polite"
+            aria-label="Evaluation results"
+            className="space-y-6"
+          >
+            <Stagger className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5" stagger={0.06}>
+              {METRICS.map((m) => (
+                <MetricTile key={m.key} metric={m} value={Number(results[m.key] ?? 0)} />
+              ))}
+            </Stagger>
+            <Card>
+              <CardContent>
+                <MetricsChart
+                  data={METRICS.map((m) => ({ metric: m.label, value: Number(results[m.key] ?? 0) }))}
                 />
-              );
-            })}
-          </div>
-          <Card>
-            <CardContent>
-              <MetricsChart
-                data={METRICS.map((m) => ({ metric: m.label, value: Number(results[m.key] ?? 0) }))}
-              />
-              {Array.isArray(results.top_5_mentor_ids) && results.top_5_mentor_ids.length > 0 && (
-                <p className="mt-4 break-all text-xs text-muted-foreground">
-                  Top 5 returned: <span className="font-mono">{results.top_5_mentor_ids.join(", ")}</span>
-                </p>
-              )}
-            </CardContent>
-          </Card>
-        </section>
-      )}
+                {Array.isArray(results.top_5_mentor_ids) && results.top_5_mentor_ids.length > 0 && (
+                  <p className="mt-5 break-all rounded-xl border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                    Top 5 returned:{" "}
+                    <span className="font-mono text-foreground/80">
+                      {results.top_5_mentor_ids.join(", ")}
+                    </span>
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          </motion.section>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

@@ -4,8 +4,8 @@
 // Lives in a `_components` private folder so the App Router ignores it.
 
 import { useState } from "react";
-import { ChevronsUpDown, X } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { AnimatePresence, motion } from "framer-motion";
+import { AlertCircle, Check, ChevronsUpDown, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
@@ -24,15 +24,39 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import { SPRING } from "@/components/motion";
 import { cn } from "@/lib/utils";
 import { SECTOR_OPTIONS, sectorLabel } from "@/lib/validation";
 
+/** Field-level error line; slides in under its input. */
 export function FieldError({ id, message }) {
-  if (!message) return null;
   return (
-    <p id={id} role="alert" className="text-xs text-destructive">
-      {message}
-    </p>
+    <AnimatePresence initial={false}>
+      {message ? (
+        <motion.p
+          key="error"
+          id={id}
+          role="alert"
+          initial={{ opacity: 0, y: -4 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -4 }}
+          transition={{ duration: 0.18 }}
+          className="flex items-center gap-1.5 text-xs font-medium text-destructive"
+        >
+          <AlertCircle className="size-3.5 shrink-0" aria-hidden="true" />
+          {message}
+        </motion.p>
+      ) : null}
+    </AnimatePresence>
+  );
+}
+
+/** "(optional)" marker used next to labels. */
+export function OptionalTag() {
+  return (
+    <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+      optional
+    </span>
   );
 }
 
@@ -58,15 +82,15 @@ export function SelectField({
     return items.find((o) => o.value === v)?.label ?? v;
   };
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-2">
       <Label htmlFor={id}>
         {label}
-        {optional && <span className="font-normal text-muted-foreground">(optional)</span>}
+        {optional && <OptionalTag />}
       </Label>
       <Select value={value || null} onValueChange={(v) => onChange(v ?? "")} disabled={disabled}>
         <SelectTrigger
           id={id}
-          className="h-10 w-full"
+          className="h-11 w-full"
           aria-invalid={Boolean(error) || undefined}
           aria-describedby={error ? `${id}-error` : undefined}
         >
@@ -89,8 +113,8 @@ export function SelectField({
 
 /**
  * Searchable multi-select for sectors (Command inside a Popover), with the
- * picks shown as removable Badges. Values are the backend literals
- * ("Others"); labels are what the UI shows ("Other").
+ * picks shown as removable chips that pop in and out. Values are the backend
+ * literals ("Others"); labels are what the UI shows ("Other").
  */
 export function SectorMultiSelect({
   id = "sector-expertise",
@@ -110,7 +134,7 @@ export function SectorMultiSelect({
   const describedBy = error ? `${id}-error` : hint ? `${id}-hint` : undefined;
 
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-2">
       <Label htmlFor={id}>{label}</Label>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger
@@ -120,18 +144,25 @@ export function SectorMultiSelect({
               id={id}
               type="button"
               variant="outline"
-              className="h-10 w-full justify-between font-normal"
+              className="h-11 w-full justify-between rounded-xl bg-card/70 px-3.5 font-normal hover:bg-card/70 hover:text-foreground"
               aria-invalid={Boolean(error) || undefined}
               aria-describedby={describedBy}
             />
           }
         >
-          <span className={cn("truncate", value.length === 0 && "text-muted-foreground")}>
-            {value.length === 0
-              ? "Search and select sectors"
-              : `${value.length} sector${value.length === 1 ? "" : "s"} selected`}
+          <span className="flex min-w-0 items-center gap-2">
+            {value.length > 0 && (
+              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary text-[11px] font-semibold tabular-nums text-primary-foreground">
+                {value.length}
+              </span>
+            )}
+            <span className={cn("truncate", value.length === 0 && "text-muted-foreground")}>
+              {value.length === 0
+                ? "Search and select sectors"
+                : `sector${value.length === 1 ? "" : "s"} selected`}
+            </span>
           </span>
-          <ChevronsUpDown className="h-4 w-4 opacity-50" aria-hidden="true" />
+          <ChevronsUpDown className="size-4 opacity-50" aria-hidden="true" />
         </PopoverTrigger>
         <PopoverContent className="w-(--anchor-width) p-0" align="start">
           <Command>
@@ -159,23 +190,33 @@ export function SectorMultiSelect({
       </Popover>
 
       {value.length > 0 && (
-        <ul className="flex flex-wrap gap-2 pt-1" aria-label="Selected sectors">
-          {value.map((sector) => (
-            <li key={sector}>
-              <Badge variant="secondary" className="h-6 gap-1 pr-1">
-                {sectorLabel(sector)}
-                <button
-                  type="button"
-                  onClick={() => toggle(sector)}
-                  disabled={disabled}
-                  className="inline-flex items-center justify-center rounded-full p-0.5 hover:bg-foreground/10 hover:text-foreground"
-                  aria-label={`Remove ${sectorLabel(sector)}`}
-                >
-                  <X className="h-3 w-3" aria-hidden="true" />
-                </button>
-              </Badge>
-            </li>
-          ))}
+        <ul className="flex flex-wrap gap-1.5 pt-0.5" aria-label="Selected sectors">
+          <AnimatePresence initial={false}>
+            {value.map((sector) => (
+              <motion.li
+                key={sector}
+                layout
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                transition={SPRING.snappy}
+              >
+                <span className="inline-flex h-7 items-center gap-1 rounded-full border border-primary/20 bg-primary/10 pl-2.5 pr-1 text-xs font-medium text-primary">
+                  <Check className="size-3" aria-hidden="true" />
+                  {sectorLabel(sector)}
+                  <button
+                    type="button"
+                    onClick={() => toggle(sector)}
+                    disabled={disabled}
+                    className="ml-0.5 inline-flex size-5 items-center justify-center rounded-full outline-none transition-colors hover:bg-primary/20 focus-visible:ring-2 focus-visible:ring-ring/50"
+                    aria-label={`Remove ${sectorLabel(sector)}`}
+                  >
+                    <X className="size-3" aria-hidden="true" />
+                  </button>
+                </span>
+              </motion.li>
+            ))}
+          </AnimatePresence>
         </ul>
       )}
       {error ? (

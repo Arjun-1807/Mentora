@@ -4,7 +4,9 @@ import { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import { CalendarX2, Loader2 } from "lucide-react";
+import { motion } from "framer-motion";
+import { ArrowLeft, CalendarCheck2, CalendarX2 } from "lucide-react";
+import { LogoMark } from "@/components/brand/Logo";
 import PageWrapper from "@/components/layout/PageWrapper";
 import { StateCard } from "@/components/StateCard";
 import { Button } from "@/components/ui/button";
@@ -73,7 +75,10 @@ function CallbackContent() {
         title="Calendar not connected"
         description={failure}
         actions={
-          <Button render={<Link href={destinationFor(getUserRole())} />}>Back to dashboard</Button>
+          <Button render={<Link href={destinationFor(getUserRole())} />}>
+            <ArrowLeft aria-hidden="true" />
+            Back to dashboard
+          </Button>
         }
       />
     );
@@ -82,11 +87,40 @@ function CallbackContent() {
   return <Connecting />;
 }
 
+/** Animated "linking" visual: Mentora mark and a calendar joined by travelling dots. */
 function Connecting() {
   return (
-    <div role="status" aria-live="polite" className="flex flex-col items-center gap-3 py-16 text-center text-muted-foreground">
-      <Loader2 className="h-6 w-6 animate-spin text-primary" aria-hidden="true" />
-      <p className="text-sm">Connecting your Google Calendar…</p>
+    <div
+      role="status"
+      aria-live="polite"
+      className="surface relative flex flex-col items-center overflow-hidden rounded-3xl px-6 py-12 text-center"
+    >
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute left-1/2 top-0 h-40 w-72 -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary/20 blur-3xl"
+      />
+      <div aria-hidden="true" className="relative flex items-center gap-3">
+        <LogoMark className="size-12 rounded-2xl" />
+        <div className="flex w-16 items-center justify-between">
+          {[0, 1, 2].map((i) => (
+            <motion.span
+              key={i}
+              className="size-1.5 rounded-full bg-primary"
+              animate={{ opacity: [0.2, 1, 0.2], scale: [0.8, 1.2, 0.8] }}
+              transition={{ duration: 1.2, repeat: Infinity, delay: i * 0.2, ease: "easeInOut" }}
+            />
+          ))}
+        </div>
+        <span className="flex size-12 items-center justify-center rounded-2xl border border-border bg-card text-primary shadow-soft">
+          <CalendarCheck2 className="size-6" />
+        </span>
+      </div>
+      <h1 className="relative mt-8 text-lg font-semibold tracking-tight text-foreground">
+        Connecting your Google Calendar…
+      </h1>
+      <p className="relative mt-2 max-w-xs text-sm text-muted-foreground">
+        Hang tight — we&apos;re finishing the handshake with Google. This only takes a moment.
+      </p>
     </div>
   );
 }

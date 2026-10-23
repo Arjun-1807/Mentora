@@ -66,31 +66,34 @@ export default function MentorCard({
 
   return (
     <motion.article
-      initial={{ opacity: 0, y: 16 }}
+      initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.4, ease: EASE_OUT, delay: index * 0.08 }}
-      whileHover={{
-        y: -3,
-        boxShadow: "0 18px 40px -20px rgb(0 0 0 / 0.75)",
-        transition: { duration: 0.2 },
-      }}
+      transition={{ duration: 0.5, ease: EASE_OUT, delay: index * 0.07 }}
+      whileHover={{ y: -3, transition: { type: "spring", stiffness: 400, damping: 28 } }}
       className={cn(
-        "rounded-xl bg-card text-card-foreground ring-1 ring-foreground/10 shadow-sm transition-shadow duration-200",
+        "surface group/mentor relative overflow-hidden rounded-2xl transition-shadow duration-300 hover:shadow-lift",
         className
       )}
     >
-      <div className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:p-5">
+      {/* Accent bar that grows in on hover. */}
+      <span
+        aria-hidden="true"
+        className="absolute inset-y-0 left-0 w-[3px] origin-top scale-y-0 bg-gradient-to-b from-primary to-spark transition-transform duration-500 ease-out group-hover/mentor:scale-y-100"
+      />
+      <div className="flex flex-col gap-5 p-5 sm:flex-row sm:items-center sm:p-6">
         <div className="flex min-w-0 flex-1 items-start gap-4">
           <span
             aria-hidden="true"
-            className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-primary text-base font-bold text-primary-foreground"
+            className="relative flex size-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-primary/90 to-[color-mix(in_oklch,var(--primary),var(--spark)_55%)] text-base font-semibold text-primary-foreground shadow-[inset_0_1px_0_0_rgb(255_255_255/0.25)]"
           >
             {initialsOf(name)}
           </span>
-          <div className="min-w-0 flex-1 space-y-2">
+          <div className="min-w-0 flex-1 space-y-2.5">
             <div className="flex flex-wrap items-center gap-2">
-              <h3 className="truncate text-base font-bold text-foreground">{name}</h3>
-              {mentor.domain && <Badge variant="outline">{mentor.domain}</Badge>}
+              <h3 className="truncate text-base font-semibold tracking-tight text-foreground">
+                {name}
+              </h3>
+              {mentor.domain && <Badge variant="soft">{mentor.domain}</Badge>}
               {stages.map((stage) => (
                 <Badge key={stage} variant="secondary" className="capitalize">
                   {stage}
@@ -101,22 +104,16 @@ export default function MentorCard({
               <ul className="flex flex-wrap gap-1.5" aria-label="Expertise">
                 {shown.map((item) => (
                   <li key={item}>
-                    <Badge
-                      variant="outline"
-                      className="h-auto py-0.5 text-[11px] font-normal text-muted-foreground"
-                    >
+                    <span className="inline-flex rounded-md border border-border bg-muted/50 px-2 py-0.5 text-[11px] text-muted-foreground">
                       {item}
-                    </Badge>
+                    </span>
                   </li>
                 ))}
                 {overflow > 0 && (
                   <li>
-                    <Badge
-                      variant="outline"
-                      className="h-auto py-0.5 text-[11px] font-normal text-muted-foreground"
-                    >
+                    <span className="inline-flex rounded-md border border-dashed border-border px-2 py-0.5 text-[11px] text-muted-foreground">
                       +{overflow} more
-                    </Badge>
+                    </span>
                   </li>
                 )}
               </ul>
@@ -124,13 +121,15 @@ export default function MentorCard({
           </div>
         </div>
 
-        <div className="flex items-center justify-between gap-3 sm:justify-end">
+        <div className="flex items-center justify-between gap-4 border-t border-border pt-4 sm:justify-end sm:border-t-0 sm:pt-0">
           {score !== null && (
-            <div className="flex items-center gap-2">
-              <ScoreRing value={score} size={48} stroke={4} label={`Match score ${Math.round(score)}%`}>
+            <div className="flex items-center gap-2.5">
+              <ScoreRing value={score} size={52} stroke={4} label={`Match score ${Math.round(score)}%`}>
                 <span className="text-[11px]">{Math.round(score)}%</span>
               </ScoreRing>
-              <span className="text-xs text-muted-foreground sm:hidden">match</span>
+              <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                match
+              </span>
             </div>
           )}
 
@@ -138,8 +137,7 @@ export default function MentorCard({
             <div className="flex items-center gap-2">
               <Button
                 type="button"
-                variant="outline"
-                className="border-destructive/50 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                variant="destructive"
                 onClick={() => onDecline?.(mentor)}
                 disabled={Boolean(busy)}
               >
@@ -167,14 +165,16 @@ export default function MentorCard({
                 ) : (
                   <Mail aria-hidden="true" />
                 )}
-                Send Intro Email
+                Send intro
               </Button>
             )
           )}
         </div>
       </div>
 
-      {children ? <div className="border-t border-border px-4 py-4 sm:px-5">{children}</div> : null}
+      {children ? (
+        <div className="border-t border-border bg-muted/25 px-5 py-5 sm:px-6">{children}</div>
+      ) : null}
     </motion.article>
   );
 }

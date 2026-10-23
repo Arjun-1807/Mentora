@@ -17,8 +17,8 @@ function FrozenRouter({ children }) {
 }
 
 /**
- * Cross-fades between routes. Keyed on the pathname so every navigation
- * plays a short exit, then the next page's own staggered entrance.
+ * Cross-fades between routes, keyed on the pathname so every
+ * navigation plays a quick exit, then the next page's own staggered entrance.
  * `reducedMotion="user"` drops transforms for prefers-reduced-motion users.
  */
 export default function PageTransition({ children }) {
@@ -32,9 +32,16 @@ export default function PageTransition({ children }) {
         <motion.div
           key={pathname}
           className="flex-1 flex flex-col"
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0, transition: { duration: 0.25, ease: "easeOut" } }}
-          exit={{ opacity: 0, y: -8, transition: { duration: 0.15, ease: "easeIn" } }}
+          // No `filter` here: a resting filter value creates a containing
+          // block and would break `position: fixed` descendants (the
+          // dashboard sidebar). Transforms reset to `none` at rest, so y is fine.
+          initial={{ opacity: 0, y: 10 }}
+          animate={{
+            opacity: 1,
+            y: 0,
+            transition: { duration: 0.35, ease: [0.22, 1, 0.36, 1] },
+          }}
+          exit={{ opacity: 0, y: -6, transition: { duration: 0.15, ease: "easeIn" } }}
         >
           <FrozenRouter>{children}</FrozenRouter>
         </motion.div>

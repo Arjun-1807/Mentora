@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2 } from "lucide-react";
+import { LogoMark } from "@/components/brand/Logo";
 import { useRequireAuth } from "@/hooks/use-auth";
 import { roleHome } from "@/lib/storage";
 
@@ -57,9 +57,15 @@ function LoadingFrame({ status }) {
       <div
         role="status"
         aria-live="polite"
-        className="flex flex-col items-center gap-3 text-muted-foreground"
+        className="flex flex-col items-center gap-5 text-muted-foreground"
       >
-        <Loader2 className="h-6 w-6 animate-spin" aria-hidden="true" />
+        <span className="relative flex size-12 items-center justify-center">
+          <span
+            aria-hidden="true"
+            className="absolute inset-0 animate-spin rounded-full border-2 border-primary/15 border-t-primary"
+          />
+          <LogoMark className="size-7 rounded-lg" />
+        </span>
         <p className="text-sm">
           {status === "signed-out"
             ? "Redirecting you to sign in…"

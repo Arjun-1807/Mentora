@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
+import { motion } from "framer-motion";
 import { toast } from "sonner";
-import { Loader2 } from "lucide-react";
+import { Loader2, Sparkles } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -48,13 +49,14 @@ function YesNo({ id, value, onChange, disabled, labelledBy }) {
     { key: "no", label: "No", val: false },
   ];
   const tabStop = value === false ? "no" : "yes";
+  const pillId = `yesno-${useId()}`;
   return (
     <div
       id={id}
       role="radiogroup"
       aria-labelledby={labelledBy}
       onKeyDown={onKeyDown}
-      className="inline-flex rounded-lg border border-border p-0.5"
+      className="inline-flex rounded-xl border border-border bg-muted/50 p-1"
     >
       {options.map((opt) => {
         const selected = value === opt.val;
@@ -69,18 +71,44 @@ function YesNo({ id, value, onChange, disabled, labelledBy }) {
             disabled={disabled}
             onClick={() => onChange(opt.val)}
             className={cn(
-              "min-w-16 rounded-md px-3 py-1.5 text-sm font-medium transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50",
+              "relative min-w-20 rounded-lg px-4 py-1.5 text-sm font-medium outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50",
               selected
                 ? opt.val
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-secondary text-secondary-foreground"
+                  ? "text-success"
+                  : "text-foreground"
                 : "text-muted-foreground hover:text-foreground"
             )}
           >
-            {opt.label}
+            {selected && (
+              <motion.span
+                layoutId={pillId}
+                aria-hidden="true"
+                transition={{ type: "spring", stiffness: 500, damping: 34 }}
+                className={cn(
+                  "absolute inset-0 rounded-lg shadow-[inset_0_1px_0_0_var(--highlight),0_1px_3px_0_var(--shadow-color)]",
+                  opt.val ? "bg-success/15 ring-1 ring-success/30" : "bg-card ring-1 ring-border"
+                )}
+              />
+            )}
+            <span className="relative">{opt.label}</span>
           </button>
         );
       })}
+    </div>
+  );
+}
+
+/** Numbered question block inside the dialog. */
+function Question({ n, children }) {
+  return (
+    <div className="flex gap-3">
+      <span
+        aria-hidden="true"
+        className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/12 font-mono text-[11px] font-semibold text-primary"
+      >
+        {n}
+      </span>
+      <div className="min-w-0 flex-1 space-y-2.5">{children}</div>
     </div>
   );
 }
@@ -148,44 +176,51 @@ export default function HealthLogDialog({ open, onOpenChange, match, role = "sta
 
   return (
     <Dialog open={open} onOpenChange={(next) => !submitting && onOpenChange(next)}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
         <form onSubmit={handleSubmit} noValidate className="grid gap-5">
           <DialogHeader>
-            <DialogTitle>Log meeting outcome</DialogTitle>
+            <span className="mb-1 flex size-10 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-[color-mix(in_oklch,var(--primary),var(--spark)_55%)] text-primary-foreground shadow-[inset_0_1px_0_0_rgb(255_255_255/0.25)]">
+              <Sparkles className="size-5" aria-hidden="true" />
+            </span>
+            <DialogTitle className="text-lg">Log meeting outcome</DialogTitle>
             <DialogDescription>
               How did your meeting{counterpartName ? ` with ${counterpartName}` : ""} go? This
               updates the startup&apos;s health score.
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-2">
-            <Label>How much momentum did this add?</Label>
-            <StarRating
-              label="Momentum, 1 to 5 stars"
-              value={momentum}
-              onChange={setMomentum}
-              disabled={submitting}
-            />
-          </div>
+          <div className="space-y-5 rounded-2xl border border-border bg-muted/30 p-4">
+            <Question n={1}>
+              <Label>How much momentum did this add?</Label>
+              <StarRating
+                label="Momentum, 1 to 5 stars"
+                value={momentum}
+                onChange={setMomentum}
+                disabled={submitting}
+              />
+            </Question>
 
-          <div className="space-y-2">
-            <Label id="health-blockers-label">{copy.blockers}</Label>
-            <YesNo
-              value={resolved}
-              onChange={setResolved}
-              disabled={submitting}
-              labelledBy="health-blockers-label"
-            />
-          </div>
+            <Question n={2}>
+              <Label id="health-blockers-label" className="leading-snug">
+                {copy.blockers}
+              </Label>
+              <YesNo
+                value={resolved}
+                onChange={setResolved}
+                disabled={submitting}
+                labelledBy="health-blockers-label"
+              />
+            </Question>
 
-          <div className="space-y-2">
-            <Label>{copy.engagement}</Label>
-            <StarRating
-              label="Engagement, 1 to 5 stars"
-              value={engagement}
-              onChange={setEngagement}
-              disabled={submitting}
-            />
+            <Question n={3}>
+              <Label className="leading-snug">{copy.engagement}</Label>
+              <StarRating
+                label="Engagement, 1 to 5 stars"
+                value={engagement}
+                onChange={setEngagement}
+                disabled={submitting}
+              />
+            </Question>
           </div>
 
           <div className="space-y-1.5">
@@ -201,7 +236,7 @@ export default function HealthLogDialog({ open, onOpenChange, match, role = "sta
               onChange={(e) => setNotes(e.target.value)}
               disabled={submitting}
             />
-            <p className="text-right text-xs text-muted-foreground tabular-nums">
+            <p className="text-right font-mono text-[11px] text-muted-foreground tabular-nums">
               {notes.length}/{MAX_NOTES}
             </p>
           </div>
