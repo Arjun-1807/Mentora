@@ -42,10 +42,11 @@ export function useCalendarStatus(initial) {
 
 export function ConnectedBadge({ className }) {
   return (
-    <Badge
-      variant="outline"
-      className={cn("h-6 gap-1 border-emerald-500/40 bg-emerald-500/15 px-2.5 text-emerald-300", className)}
-    >
+    <Badge variant="success" className={cn("h-7 gap-2 px-3", className)}>
+      <span aria-hidden="true" className="relative flex size-2">
+        <span className="absolute inset-0 animate-ping rounded-full bg-success opacity-60 motion-reduce:hidden" />
+        <span className="relative size-2 rounded-full bg-success" />
+      </span>
       <Check aria-hidden="true" />
       Calendar Connected
     </Badge>
@@ -53,7 +54,12 @@ export function ConnectedBadge({ className }) {
 }
 
 /** Starts Google OAuth: fetches the auth URL and sends the browser there. */
-export function ConnectCalendarButton({ size = "default", className, children = "Connect Google Calendar" }) {
+export function ConnectCalendarButton({
+  size = "default",
+  variant = "default",
+  className,
+  children = "Connect Google Calendar",
+}) {
   const [busy, setBusy] = useState(false);
 
   async function handleClick() {
@@ -71,7 +77,14 @@ export function ConnectCalendarButton({ size = "default", className, children = 
   }
 
   return (
-    <Button type="button" size={size} onClick={handleClick} disabled={busy} className={className}>
+    <Button
+      type="button"
+      size={size}
+      variant={variant}
+      onClick={handleClick}
+      disabled={busy}
+      className={className}
+    >
       {busy ? <Loader2 className="animate-spin" aria-hidden="true" /> : <CalendarDays aria-hidden="true" />}
       {children}
     </Button>
@@ -89,10 +102,17 @@ export function CalendarStatus({ initial, size = "default" }) {
 export default function CalendarConnectCard({ initial, className }) {
   const { connected, loading } = useCalendarStatus(initial);
   return (
-    <Card className={cn("h-full", className)}>
+    <Card className={cn("relative h-full", className)}>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <CalendarDays className="h-4 w-4 text-primary" aria-hidden="true" />
+          <span
+            className={cn(
+              "flex size-8 items-center justify-center rounded-xl transition-colors",
+              connected ? "bg-success/12 text-success" : "bg-info/12 text-info"
+            )}
+          >
+            <CalendarDays className="size-4" aria-hidden="true" />
+          </span>
           Google Calendar
         </CardTitle>
         <CardDescription>
@@ -101,13 +121,13 @@ export default function CalendarConnectCard({ initial, className }) {
             : "Connect your calendar so you can book meetings with accepted mentors."}
         </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="mt-auto">
         {loading ? (
           <Skeleton className="h-8 w-48" />
         ) : connected ? (
           <ConnectedBadge />
         ) : (
-          <ConnectCalendarButton size="sm" />
+          <ConnectCalendarButton size="sm" variant="outline" />
         )}
       </CardContent>
     </Card>

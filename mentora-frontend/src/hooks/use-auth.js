@@ -86,12 +86,19 @@ export function useAuth() {
     setStoredRole(null);
   }, []);
 
+  // Re-runs the /me sync (e.g. a "Try again" after userStatus === "error").
+  // Goes through AUTH_EVENT so every useAuth instance picks up the result.
+  const refresh = useCallback(() => {
+    window.dispatchEvent(new Event(AUTH_EVENT));
+  }, []);
+
   return {
     status,
     user,
     userStatus,
     role: user?.role || storedRole || null,
     signOut,
+    refresh,
     isSignedIn: status === "signed-in",
   };
 }

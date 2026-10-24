@@ -1,43 +1,46 @@
 "use client";
 
+import { useRef } from "react";
 import Link from "next/link";
-import { motion } from "framer-motion";
+import { motion, useScroll, useTransform } from "framer-motion";
 import {
   ArrowRight,
-  BarChart3,
+  ArrowUpRight,
+  Building2,
+  CalendarCheck,
   FileUp,
-  MailCheck,
-  Network,
-  ScanText,
+  GraduationCap,
+  Rocket,
   Sparkles,
-  Users,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import Logo from "@/components/brand/Logo";
+import HeroPreview from "@/components/landing/HeroPreview";
+import {
+  ExtractionVisual,
+  MatchingVisual,
+  OutcomeVisual,
+  OutreachVisual,
+} from "@/components/landing/FeatureVisuals";
+import {
+  CountUp,
+  EASE_OUT,
+  FadeIn,
+  Magnetic,
+  Reveal,
+  SpotlightCard,
+  Stagger,
+  wordVariants,
+  containerVariants,
+} from "@/components/motion";
 import { cn } from "@/lib/utils";
 
-const EASE_OUT = [0.22, 1, 0.36, 1];
-
-const heroContainer = {
-  hidden: {},
-  show: { transition: { staggerChildren: 0.12, delayChildren: 0.05 } },
-};
-const heroItem = {
-  hidden: { opacity: 0, y: 20 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.5, ease: EASE_OUT } },
-};
-const headlineContainer = {
-  hidden: {},
-  show: { transition: { staggerChildren: 0.05 } },
-};
-const headlineWord = {
-  hidden: { opacity: 0, y: 20 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.45, ease: EASE_OUT } },
-};
-
-const HEADLINE_LINES = [["Find", "the", "right", "mentor."], ["Automatically."]];
-const HEADLINE_TEXT = "Find the right mentor. Automatically.";
-
-const STATS = ["500+ Mentors", "12 Incubators", "89% Meeting Rate"];
+const STATS = [
+  { value: 500, suffix: "+", label: "Domain-expert mentors" },
+  { value: 12, suffix: "", label: "Partner incubators" },
+  { value: 89, suffix: "%", label: "Intros that become meetings" },
+  { value: 60, prefix: "<", suffix: "s", label: "From deck to matches" },
+];
 
 const STEPS = [
   {
@@ -51,7 +54,7 @@ const STEPS = [
     description: "AI ranks domain-expert mentors by fit, stage and track record.",
   },
   {
-    icon: Users,
+    icon: CalendarCheck,
     title: "Book a meeting",
     description: "Send a personalised intro and lock in a slot on both calendars.",
   },
@@ -59,160 +62,239 @@ const STEPS = [
 
 const FEATURES = [
   {
-    icon: ScanText,
-    title: "AI Extraction",
+    eyebrow: "AI extraction",
+    title: "Your deck, understood",
     description:
       "Reads your pitch deck and pulls out domain, stage, challenges and team gaps — plus tips to make it sharper.",
+    visual: ExtractionVisual,
+    className: "md:col-span-4",
   },
   {
-    icon: Network,
-    title: "Semantic Matching",
-    description:
-      "Embeds your profile and every mentor's expertise, then ranks by real meaning — not keyword overlap.",
+    eyebrow: "Semantic matching",
+    title: "Meaning over keywords",
+    description: "Embeds your profile and every mentor's expertise, then ranks by real fit.",
+    visual: MatchingVisual,
+    className: "md:col-span-2",
   },
   {
-    icon: MailCheck,
-    title: "Auto Outreach",
-    description:
-      "Drafts a personalised intro email for each mentor that you can edit and send in one click.",
+    eyebrow: "Auto outreach",
+    title: "Intros that write themselves",
+    description: "A personalised email for each mentor — edit it, send it in one click.",
+    visual: OutreachVisual,
+    className: "md:col-span-3",
   },
   {
-    icon: BarChart3,
-    title: "Outcome Tracking",
-    description:
-      "Logs every meeting and turns the outcomes into a health score your incubator can act on.",
+    eyebrow: "Outcome tracking",
+    title: "Every meeting counts",
+    description: "Outcomes roll up into a health score your incubator can act on.",
+    visual: OutcomeVisual,
+    className: "md:col-span-3",
   },
+];
+
+const ROLES = [
+  {
+    icon: Rocket,
+    title: "Founders",
+    description: "Skip the cold outreach. Get warm intros to people who've solved your exact problem.",
+    href: "/register",
+    cta: "Get matched",
+  },
+  {
+    icon: GraduationCap,
+    title: "Mentors",
+    description: "Only see founders where your experience genuinely moves the needle.",
+    href: "/register?role=mentor",
+    cta: "Join as a mentor",
+  },
+  {
+    icon: Building2,
+    title: "Incubators",
+    description: "See every startup's health, meetings and momentum across your cohort.",
+    href: "/register?role=coordinator",
+    cta: "Set up a cohort",
+  },
+];
+
+const HEADLINE = [
+  { text: "Find", accent: false },
+  { text: "the", accent: false },
+  { text: "mentor", accent: false },
+  { text: "who's", accent: false },
+  { text: "already", accent: true },
+  { text: "been", accent: true },
+  { text: "there.", accent: true },
 ];
 
 function Hero() {
   return (
-    <section className="relative isolate flex min-h-[calc(100svh-4rem)] items-center justify-center overflow-hidden px-6 py-20">
-      <div className="hero-orb -z-10" aria-hidden="true" />
-      <motion.div
-        className="mx-auto flex w-full max-w-3xl flex-col items-center text-center"
-        variants={heroContainer}
-        initial="hidden"
-        animate="show"
-      >
-        <motion.p
-          variants={heroItem}
-          className="text-[11px] font-semibold uppercase tracking-[0.15em] text-primary"
-        >
-          AI-Powered Mentor Matching
-        </motion.p>
+    <section className="relative px-4 pb-16 pt-10 sm:px-6 sm:pt-16">
+      <Stagger className="mx-auto flex max-w-4xl flex-col items-center text-center" stagger={0.1}>
+        <FadeIn>
+          <Link
+            href="/register"
+            className="group inline-flex items-center gap-2 rounded-full border border-border bg-card/60 py-1 pl-1 pr-3 text-xs font-medium text-muted-foreground shadow-soft backdrop-blur transition-colors hover:border-primary/40 hover:text-foreground"
+          >
+            <span className="rounded-full bg-primary/12 px-2 py-0.5 text-primary">New</span>
+            Book mentors straight into Google Calendar
+            <ArrowRight className="size-3 transition-transform group-hover:translate-x-0.5" aria-hidden="true" />
+          </Link>
+        </FadeIn>
 
         <motion.h1
-          variants={headlineContainer}
-          aria-label={HEADLINE_TEXT}
-          className="mt-5 font-extrabold tracking-tight text-foreground text-[clamp(2.5rem,6vw,4.5rem)] leading-[1.1]"
+          aria-label="Find the mentor who's already been there."
+          variants={containerVariants(0.06, 0.15)}
+          className="mt-7 text-[clamp(2.6rem,7vw,5.25rem)] font-semibold leading-[1.02] tracking-[-0.035em] text-foreground"
         >
-          {HEADLINE_LINES.map((line, li) => (
-            <span key={li} className="block" aria-hidden="true">
-              {line.map((word, wi) => (
-                <motion.span
-                  key={`${word}-${wi}`}
-                  variants={headlineWord}
-                  className={cn(
-                    "inline-block",
-                    wi < line.length - 1 && "mr-[0.25em]",
-                    li === 1 && "text-primary"
-                  )}
-                >
-                  {word}
-                </motion.span>
-              ))}
-            </span>
+          {HEADLINE.map((word, i) => (
+            <motion.span
+              key={`${word.text}-${i}`}
+              aria-hidden="true"
+              variants={wordVariants}
+              className={cn(
+                "inline-block",
+                word.accent &&
+                  "font-display text-[1.1em] font-normal italic tracking-[-0.01em] text-gradient-primary pr-[0.06em]"
+              )}
+            >
+              {word.text}
+              {i < HEADLINE.length - 1 ? " " : ""}
+            </motion.span>
           ))}
         </motion.h1>
 
-        <motion.p
-          variants={heroItem}
-          className="mt-6 max-w-xl text-base sm:text-lg leading-[1.6] text-muted-foreground"
+        <FadeIn
+          as="p"
+          className="mt-6 max-w-xl text-base leading-relaxed text-muted-foreground sm:text-lg"
         >
-          Upload your pitch deck. Get matched to domain-expert mentors. Book a meeting — all in
-          under 60 seconds.
-        </motion.p>
+          Upload your pitch deck. Mentora reads it, ranks 500+ domain experts by real fit, drafts the
+          intro and books the call — in under a minute.
+        </FadeIn>
 
-        <motion.div
-          variants={heroItem}
-          className="mt-9 flex w-full flex-col items-center justify-center gap-3 sm:w-auto sm:flex-row"
-        >
-          <Button size="lg" className="h-11 w-full px-6 text-base sm:w-auto" render={<Link href="/upload" />}>
-            Get Matched
-            <ArrowRight aria-hidden="true" />
-          </Button>
+        <FadeIn className="mt-9 flex w-full flex-col items-center justify-center gap-3 sm:w-auto sm:flex-row">
+          <Magnetic className="w-full sm:w-auto">
+            <Button size="xl" className="w-full sm:w-auto" render={<Link href="/upload" />}>
+              Get matched
+              <ArrowRight
+                className="transition-transform duration-300 group-hover/button:translate-x-1"
+                aria-hidden="true"
+              />
+            </Button>
+          </Magnetic>
           <Button
-            size="lg"
-            variant="ghost"
-            className="h-11 w-full px-6 text-base sm:w-auto"
+            size="xl"
+            variant="outline"
+            className="w-full sm:w-auto"
             render={<Link href="/register?role=mentor" />}
           >
-            For Mentors
+            I&apos;m a mentor
           </Button>
-        </motion.div>
+        </FadeIn>
 
-        <motion.ul
-          variants={heroItem}
-          className="mt-10 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
-          aria-label="Mentora in numbers"
-        >
-          {STATS.map((stat, i) => (
-            <li key={stat} className="flex items-center gap-3">
-              {i > 0 && (
-                <span aria-hidden="true" className="text-muted-foreground/60">
-                  ·
-                </span>
-              )}
-              <span>{stat}</span>
-            </li>
-          ))}
-        </motion.ul>
-      </motion.div>
+      </Stagger>
+
+      <div className="mt-16 sm:mt-20">
+        <HeroPreview />
+      </div>
     </section>
   );
 }
 
-function HowItWorks() {
+function Stats() {
   return (
-    <section className="border-t border-border px-6 py-24" aria-labelledby="how-heading">
-      <div className="mx-auto max-w-6xl">
-        <motion.h2
-          id="how-heading"
-          initial={{ opacity: 0, y: 30 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true, margin: "-80px" }}
-          transition={{ duration: 0.5, ease: EASE_OUT }}
-          className="text-center text-3xl font-bold tracking-tight text-foreground sm:text-4xl"
-        >
-          How Mentora works
-        </motion.h2>
+    <section aria-label="Mentora in numbers" className="px-4 py-16 sm:px-6">
+      <Stagger
+        inView
+        as="dl"
+        className="mx-auto grid max-w-5xl grid-cols-2 gap-px overflow-hidden rounded-3xl border border-border bg-border md:grid-cols-4"
+      >
+        {STATS.map((stat) => (
+          <FadeIn
+            key={stat.label}
+            className="flex flex-col-reverse bg-card/80 px-5 py-7 text-center backdrop-blur sm:px-6"
+          >
+            <dt className="mt-1.5 text-xs text-muted-foreground sm:text-sm">{stat.label}</dt>
+            <dd className="text-3xl font-semibold tracking-tight text-foreground sm:text-4xl">
+              <CountUp value={stat.value} prefix={stat.prefix} suffix={stat.suffix} />
+            </dd>
+          </FadeIn>
+        ))}
+      </Stagger>
+    </section>
+  );
+}
 
-        <ol className="relative mt-16 grid gap-12 md:grid-cols-3 md:gap-8">
-          {/* Dotted connector through the three step numbers (desktop only). */}
-          <span
-            aria-hidden="true"
-            className="absolute left-[16.67%] right-[16.67%] top-6 hidden border-t-2 border-dotted border-primary/40 md:block"
+function SectionHeading({ id, eyebrow, title, accent, description }) {
+  return (
+    <Reveal className="mx-auto max-w-2xl text-center">
+      <p className="eyebrow">{eyebrow}</p>
+      <h2
+        id={id}
+        className="mt-4 text-3xl font-semibold tracking-[-0.025em] text-foreground sm:text-5xl"
+      >
+        {title}{" "}
+        {accent && (
+          <span className="font-display text-[1.1em] font-normal italic text-gradient-primary">
+            {accent}
+          </span>
+        )}
+      </h2>
+      {description && (
+        <p className="mt-4 text-base leading-relaxed text-muted-foreground">{description}</p>
+      )}
+    </Reveal>
+  );
+}
+
+function HowItWorks() {
+  const ref = useRef(null);
+  const { scrollYProgress } = useScroll({ target: ref, offset: ["start 75%", "end 60%"] });
+  const progress = useTransform(scrollYProgress, [0, 1], [0, 1]);
+
+  return (
+    <section className="px-4 py-24 sm:px-6" aria-labelledby="how-heading">
+      <SectionHeading
+        id="how-heading"
+        eyebrow="How it works"
+        title="Three steps to the"
+        accent="right room."
+      />
+
+      <div ref={ref} className="relative mx-auto mt-16 max-w-5xl">
+        {/* Progress rail: fills as the section scrolls through (desktop). */}
+        <div
+          aria-hidden="true"
+          className="absolute left-[16.67%] right-[16.67%] top-7 hidden h-px bg-border md:block"
+        >
+          <motion.div
+            style={{ scaleX: progress }}
+            className="h-full origin-left bg-gradient-to-r from-primary via-primary to-spark"
           />
+        </div>
+
+        <ol className="grid gap-6 md:grid-cols-3 md:gap-8">
           {STEPS.map((step, i) => {
             const Icon = step.icon;
             return (
-              <motion.li
+              <Reveal
+                as="li"
                 key={step.title}
-                initial={{ opacity: 0, y: 30 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true, margin: "-60px" }}
-                transition={{ duration: 0.5, ease: EASE_OUT, delay: i * 0.12 }}
+                delay={i * 0.12}
                 className="relative flex flex-col items-center text-center"
               >
-                <span className="relative z-10 flex h-12 min-w-12 items-center justify-center bg-background px-3 text-3xl font-extrabold text-primary tabular-nums">
-                  {String(i + 1).padStart(2, "0")}
+                <span className="surface relative z-10 flex size-14 items-center justify-center rounded-2xl text-primary">
+                  <Icon className="size-6" aria-hidden="true" />
+                  <span className="absolute -right-2 -top-2 flex size-6 items-center justify-center rounded-full bg-primary font-mono text-[11px] font-semibold text-primary-foreground ring-4 ring-background">
+                    {i + 1}
+                  </span>
                 </span>
-                <span className="mt-5 flex h-11 w-11 items-center justify-center rounded-full bg-muted text-foreground">
-                  <Icon className="h-5 w-5" aria-hidden="true" />
-                </span>
-                <h3 className="mt-4 text-lg font-semibold text-foreground">{step.title}</h3>
-                <p className="mt-1.5 max-w-xs text-sm text-muted-foreground">{step.description}</p>
-              </motion.li>
+                <h3 className="mt-6 text-lg font-semibold tracking-tight text-foreground">
+                  {step.title}
+                </h3>
+                <p className="mt-2 max-w-xs text-sm leading-relaxed text-muted-foreground">
+                  {step.description}
+                </p>
+              </Reveal>
             );
           })}
         </ol>
@@ -223,61 +305,156 @@ function HowItWorks() {
 
 function Features() {
   return (
-    <section className="px-6 pb-24" aria-labelledby="features-heading">
-      <div className="mx-auto max-w-4xl">
-        <h2 id="features-heading" className="sr-only">
-          Features
-        </h2>
-        <div className="grid gap-4 sm:grid-cols-2">
-          {FEATURES.map((feature, i) => {
-            const Icon = feature.icon;
-            return (
-              <motion.div
-                key={feature.title}
-                initial={{ opacity: 0, y: 30 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true, margin: "-60px" }}
-                transition={{ duration: 0.5, ease: EASE_OUT, delay: (i % 2) * 0.08 }}
-                className="group rounded-xl border border-border bg-card p-6 transition-colors duration-200 hover:border-primary"
-              >
-                <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                  <Icon className="h-5 w-5" aria-hidden="true" />
-                </span>
-                <h3 className="mt-4 text-base font-semibold text-foreground">{feature.title}</h3>
-                <p className="mt-1.5 line-clamp-2 text-sm leading-relaxed text-muted-foreground">
-                  {feature.description}
-                </p>
-              </motion.div>
-            );
-          })}
-        </div>
+    <section className="px-4 py-24 sm:px-6" aria-labelledby="features-heading">
+      <SectionHeading
+        id="features-heading"
+        eyebrow="Features"
+        title="Everything between a deck and a"
+        accent="great meeting."
+        description="One flow replaces the spreadsheet of names, the cold emails and the scheduling back-and-forth."
+      />
+
+      <div className="mx-auto mt-14 grid max-w-6xl gap-4 md:grid-cols-6">
+        {FEATURES.map((feature, i) => {
+          const Visual = feature.visual;
+          return (
+            <Reveal key={feature.title} delay={(i % 2) * 0.08} className={feature.className}>
+              <SpotlightCard className="flex h-full flex-col gap-6 p-6 sm:p-7">
+                <div className="flex-1">
+                  <Visual />
+                </div>
+                <div>
+                  <p className="eyebrow">{feature.eyebrow}</p>
+                  <h3 className="mt-2 text-lg font-semibold tracking-tight text-foreground">
+                    {feature.title}
+                  </h3>
+                  <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
+                    {feature.description}
+                  </p>
+                </div>
+              </SpotlightCard>
+            </Reveal>
+          );
+        })}
       </div>
+    </section>
+  );
+}
+
+function Roles() {
+  return (
+    <section className="px-4 py-24 sm:px-6" aria-labelledby="roles-heading">
+      <SectionHeading
+        id="roles-heading"
+        eyebrow="Built for the whole ecosystem"
+        title="One platform,"
+        accent="three sides."
+      />
+      <Stagger inView className="mx-auto mt-14 grid max-w-5xl gap-4 md:grid-cols-3">
+        {ROLES.map((role) => {
+          const Icon = role.icon;
+          return (
+            <FadeIn key={role.title}>
+              <Link
+                href={role.href}
+                className="group surface relative flex h-full flex-col rounded-2xl p-6 outline-none transition-[box-shadow,transform] duration-300 hover:-translate-y-1 hover:shadow-lift focus-visible:ring-3 focus-visible:ring-ring/50"
+              >
+                <span className="flex size-11 items-center justify-center rounded-xl bg-primary/12 text-primary transition-colors duration-300 group-hover:bg-primary group-hover:text-primary-foreground">
+                  <Icon className="size-5" aria-hidden="true" />
+                </span>
+                <h3 className="mt-5 text-lg font-semibold tracking-tight text-foreground">
+                  For {role.title.toLowerCase()}
+                </h3>
+                <p className="mt-2 flex-1 text-sm leading-relaxed text-muted-foreground">
+                  {role.description}
+                </p>
+                <span className="mt-6 inline-flex items-center gap-1 text-sm font-medium text-primary">
+                  {role.cta}
+                  <ArrowUpRight
+                    className="size-4 transition-transform duration-300 group-hover:-translate-y-0.5 group-hover:translate-x-0.5"
+                    aria-hidden="true"
+                  />
+                </span>
+              </Link>
+            </FadeIn>
+          );
+        })}
+      </Stagger>
+    </section>
+  );
+}
+
+function FinalCta() {
+  return (
+    <section className="px-4 pb-24 pt-8 sm:px-6">
+      <Reveal className="relative mx-auto max-w-5xl overflow-hidden rounded-[2rem] border border-primary/25 px-6 py-16 text-center sm:px-12 sm:py-20">
+        <div
+          aria-hidden="true"
+          className="absolute inset-0 -z-10 bg-[radial-gradient(ellipse_at_top,color-mix(in_oklch,var(--primary)_28%,var(--card)),var(--card)_70%)]"
+        />
+        <div
+          aria-hidden="true"
+          className="absolute inset-0 -z-10 bg-grid [mask-image:radial-gradient(ellipse_at_center,black,transparent_70%)]"
+        />
+        <motion.div
+          aria-hidden="true"
+          className="absolute -bottom-24 left-1/2 -z-10 h-48 w-[60%] -translate-x-1/2 rounded-full bg-spark/25 blur-[80px]"
+          animate={{ opacity: [0.5, 0.9, 0.5] }}
+          transition={{ duration: 5, repeat: Infinity, ease: "easeInOut" }}
+        />
+        <h2 className="mx-auto max-w-2xl text-3xl font-semibold tracking-[-0.025em] text-foreground sm:text-5xl">
+          Your next mentor is{" "}
+          <span className="font-display text-[1.1em] font-normal italic text-gradient-primary">
+            one upload away.
+          </span>
+        </h2>
+        <p className="mx-auto mt-5 max-w-md text-base text-muted-foreground">
+          Drop your deck in, see your top five matches, and send the first intro today.
+        </p>
+        <div className="mt-9 flex justify-center">
+          <Magnetic>
+            <Button size="xl" render={<Link href="/upload" />}>
+              Upload your deck
+              <ArrowRight
+                className="transition-transform duration-300 group-hover/button:translate-x-1"
+                aria-hidden="true"
+              />
+            </Button>
+          </Magnetic>
+        </div>
+      </Reveal>
     </section>
   );
 }
 
 function Footer() {
   return (
-    <footer className="border-t border-border px-6 py-8">
-      <p className="text-center text-xs text-muted-foreground">
-        <span className="font-semibold text-primary">mentora</span>
-        <span aria-hidden="true"> · </span>
-        Built for incubators
-        <span aria-hidden="true"> · </span>
-        DSCE Innovation Lab
-        <span aria-hidden="true"> · </span>© 2026
-      </p>
+    <footer className="border-t border-border px-4 py-10 sm:px-6">
+      <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-4 sm:flex-row">
+        <Logo />
+        <p className="text-center text-xs text-muted-foreground">
+          Built for incubators · DSCE Innovation Lab · © 2026
+        </p>
+      </div>
     </footer>
   );
 }
 
 export default function LandingPage() {
   return (
-    <main className="flex flex-1 flex-col">
+    <motion.main
+      className="flex flex-1 flex-col"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.4, ease: EASE_OUT }}
+    >
       <Hero />
+      <Stats />
       <HowItWorks />
       <Features />
+      <Roles />
+      <FinalCta />
       <Footer />
-    </main>
+    </motion.main>
   );
 }

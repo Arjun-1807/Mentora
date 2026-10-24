@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { motion } from "framer-motion";
-import { LogOut, User } from "lucide-react";
+import { motion, useMotionValueEvent, useScroll } from "framer-motion";
+import { ArrowRight, LogOut, User } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,6 +16,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import Logo from "@/components/brand/Logo";
+import ThemeToggle from "@/components/theme/ThemeToggle";
+import { SPRING } from "@/components/motion";
 import { useAuth } from "@/hooks/use-auth";
 import { getUserEmail, getUserRole } from "@/lib/storage";
 
@@ -45,11 +48,21 @@ function initialsFrom(text) {
   return parts.slice(0, 2).map((p) => p[0].toUpperCase()).join("");
 }
 
+/**
+ * Floating glass navbar. It sits as a wide bar at the top of the page and
+ * condenses into a narrower, more opaque pill once the page scrolls. The
+ * active link is marked by a pill that slides between links (layoutId).
+ */
 export default function Navbar() {
   const pathname = usePathname();
   const router = useRouter();
   const { status, user, signOut } = useAuth();
   const [stored, setStored] = useState({ role: null, email: null });
+  const [scrolled, setScrolled] = useState(false);
+  const [hovered, setHovered] = useState(null);
+  const { scrollY } = useScroll();
+
+  useMotionValueEvent(scrollY, "change", (y) => setScrolled(y > 12));
 
   // localStorage is only readable after mount; re-read whenever auth changes.
   useEffect(() => {
@@ -64,6 +77,7 @@ export default function Navbar() {
   const email = stored.email || user?.email || "";
   const name = user?.profile?.name || "";
   const initials = initialsFrom(name || email);
+  const highlighted = hovered ?? links.find((l) => pathname === l.href)?.href ?? null;
 
   function handleSignOut() {
     signOut();
@@ -73,42 +87,63 @@ export default function Navbar() {
   return (
     <>
       <motion.header
-        initial={{ opacity: 0, y: -20 }}
+        initial={{ opacity: 0, y: -24 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3, ease: "easeOut" }}
-        className="fixed inset-x-0 top-0 z-40 h-16 border-b border-border bg-[oklch(0.147_0.004_49.25/0.85)] backdrop-blur-md"
+        transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+        className="fixed inset-x-0 top-0 z-40 px-3 pt-3 sm:px-4"
       >
-        <div className="mx-auto flex h-full max-w-6xl items-center justify-between gap-4 px-4 sm:px-6">
-          <Link
-            href="/"
-            className="rounded-md text-xl font-extrabold tracking-tight text-primary outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
-          >
-            mentora
-          </Link>
+        <motion.div
+          layout
+          transition={SPRING.soft}
+          className={cn(
+            "mx-auto flex h-14 items-center justify-between gap-4 rounded-2xl pl-4 pr-2 transition-[background-color,border-color,box-shadow] duration-300",
+            scrolled
+              ? "glass max-w-4xl shadow-soft"
+              : "max-w-6xl border border-transparent bg-transparent"
+          )}
+        >
+          <Logo />
 
           {signedIn ? (
-            <nav aria-label="Main" className="flex items-center gap-2 sm:gap-5">
-              <ul className="hidden items-center gap-5 text-sm sm:flex">
+            <nav aria-label="Main" className="flex items-center gap-1 sm:gap-2">
+              <ul
+                className="hidden items-center sm:flex"
+                onPointerLeave={() => setHovered(null)}
+              >
                 {links.map((link) => {
                   const active = pathname === link.href;
                   return (
-                    <li key={link.href}>
+                    <li key={link.href} className="relative">
                       <Link
                         href={link.href}
                         aria-current={active ? "page" : undefined}
+                        onPointerEnter={() => setHovered(link.href)}
                         className={cn(
-                          "rounded-sm outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/50",
-                          active
-                            ? "font-medium text-foreground"
-                            : "text-muted-foreground hover:text-foreground"
+                          "relative z-10 block rounded-full px-3.5 py-1.5 text-sm font-medium outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/50",
+                          active || hovered === link.href
+                            ? "text-foreground"
+                            : "text-muted-foreground"
                         )}
                       >
                         {link.label}
                       </Link>
+                      {highlighted === link.href && (
+                        <motion.span
+                          layoutId="nav-pill"
+                          transition={SPRING.snappy}
+                          aria-hidden="true"
+                          className={cn(
+                            "absolute inset-0 rounded-full",
+                            active ? "bg-primary/12 ring-1 ring-primary/20" : "bg-muted"
+                          )}
+                        />
+                      )}
                     </li>
                   );
                 })}
               </ul>
+
+              <ThemeToggle />
 
               <DropdownMenu>
                 <DropdownMenuTrigger
@@ -116,19 +151,21 @@ export default function Navbar() {
                     <button
                       type="button"
                       aria-label={email ? `Account menu for ${email}` : "Account menu"}
-                      className="flex h-9 w-9 items-center justify-center rounded-full bg-primary text-sm font-semibold text-primary-foreground outline-none transition-opacity hover:opacity-90 focus-visible:ring-3 focus-visible:ring-ring/50"
+                      className="flex size-9 items-center justify-center rounded-full bg-gradient-to-br from-primary to-[color-mix(in_oklch,var(--primary),var(--spark)_50%)] text-xs font-semibold text-primary-foreground shadow-[inset_0_1px_0_0_rgb(255_255_255/0.25)] outline-none ring-2 ring-background transition-transform hover:scale-105 focus-visible:ring-ring/60"
                     />
                   }
                 >
-                  {initials || <User className="h-4 w-4" aria-hidden="true" />}
+                  {initials || <User className="size-4" aria-hidden="true" />}
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="min-w-52">
+                <DropdownMenuContent align="end" className="min-w-56">
                   <DropdownMenuGroup>
-                    <DropdownMenuLabel className="truncate">
-                      {name || email || "Signed in"}
+                    <DropdownMenuLabel className="truncate py-2">
+                      <span className="block truncate text-sm font-medium text-foreground">
+                        {name || email || "Signed in"}
+                      </span>
                       {role && (
-                        <span className="block text-[11px] font-normal capitalize text-muted-foreground">
-                          {role}
+                        <span className="mt-0.5 block text-xs font-normal capitalize text-muted-foreground">
+                          {role} account
                         </span>
                       )}
                     </DropdownMenuLabel>
@@ -144,7 +181,7 @@ export default function Navbar() {
                   <DropdownMenuSeparator />
                   <DropdownMenuItem variant="destructive" onClick={handleSignOut}>
                     <LogOut aria-hidden="true" />
-                    Sign Out
+                    Sign out
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -153,17 +190,24 @@ export default function Navbar() {
             // While auth is "loading" keep the buttons invisible so the bar never shifts.
             <nav
               aria-label="Main"
-              className={cn("flex items-center gap-2", status === "loading" && "invisible")}
+              className={cn("flex items-center gap-1", status === "loading" && "invisible")}
             >
-              <Button variant="ghost" render={<Link href="/login" />}>
-                Sign In
+              <ThemeToggle />
+              <Button variant="ghost" className="hidden sm:inline-flex" render={<Link href="/login" />}>
+                Sign in
               </Button>
-              <Button render={<Link href="/register" />}>Get Started</Button>
+              <Button className="rounded-full pr-3" render={<Link href="/register" />}>
+                Get started
+                <ArrowRight
+                  className="transition-transform group-hover/button:translate-x-0.5"
+                  aria-hidden="true"
+                />
+              </Button>
             </nav>
           )}
-        </div>
+        </motion.div>
       </motion.header>
-      <div aria-hidden="true" className="h-16 shrink-0" />
+      <div aria-hidden="true" className="h-20 shrink-0" />
     </>
   );
 }

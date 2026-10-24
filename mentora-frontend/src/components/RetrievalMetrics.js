@@ -3,9 +3,9 @@
 import { useEffect, useId, useState } from "react";
 import dynamic from "next/dynamic";
 import { AnimatePresence, motion } from "framer-motion";
-import { ChevronDown, Info, Loader2 } from "lucide-react";
+import { ChevronDown, FlaskConical, Info, Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import { CountUp, FadeIn, HoverCard, Stagger } from "@/components/motion";
+import { CountUp, FadeIn, SpotlightCard, Stagger } from "@/components/motion";
 import { InlineError } from "@/components/StateCard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,7 +14,6 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
 import { runEvaluation } from "@/lib/api";
 import { getStoredProfile } from "@/lib/storage";
 import { parseEvaluationInput } from "@/lib/validation";
@@ -63,34 +62,32 @@ const EXAMPLE_PROFILE = {
 
 function MetricCard({ label, help, value }) {
   return (
-    <HoverCard>
-      <Card size="sm">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-1.5 text-xs uppercase tracking-wide text-muted-foreground">
-            {label}
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <button
-                    type="button"
-                    className="inline-flex text-muted-foreground hover:text-foreground"
-                    aria-label={`What is ${label}?`}
-                  />
-                }
-              >
-                <Info className="h-3.5 w-3.5" aria-hidden="true" />
-              </TooltipTrigger>
-              <TooltipContent className="max-w-60 normal-case tracking-normal">{help}</TooltipContent>
-            </Tooltip>
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-2xl font-bold text-foreground tabular-nums">
-            <CountUp value={value} decimals={3} />
-          </p>
-        </CardContent>
-      </Card>
-    </HoverCard>
+    <FadeIn className="h-full">
+      <SpotlightCard className="h-full p-4">
+        <p className="flex items-center gap-1.5 font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+          {label}
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  className="inline-flex rounded-full text-muted-foreground outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+                  aria-label={`What is ${label}?`}
+                />
+              }
+            >
+              <Info className="size-3.5" aria-hidden="true" />
+            </TooltipTrigger>
+            <TooltipContent className="max-w-60 font-sans normal-case tracking-normal">
+              {help}
+            </TooltipContent>
+          </Tooltip>
+        </p>
+        <p className="mt-2 text-2xl font-semibold tracking-tight text-foreground">
+          <CountUp value={value} decimals={3} />
+        </p>
+      </SpotlightCard>
+    </FadeIn>
   );
 }
 
@@ -136,7 +133,7 @@ export function RetrievalMetrics() {
   }
 
   return (
-    <FadeIn className="mt-8">
+    <FadeIn className="mt-8" initial="hidden" animate="show">
       <Card>
         <CardHeader>
           <button
@@ -144,21 +141,29 @@ export function RetrievalMetrics() {
             onClick={() => setOpen((o) => !o)}
             aria-expanded={open}
             aria-controls={panelId}
-            className="flex w-full items-center justify-between gap-4 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            className="flex w-full items-center justify-between gap-4 rounded-xl text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
           >
-            <span>
-              <CardTitle>Retrieval Metrics</CardTitle>
-              <CardDescription className="mt-1">
-                Check how well matching ranks the mentors you know are right for a profile.
-              </CardDescription>
+            <span className="flex items-start gap-3">
+              <span
+                aria-hidden="true"
+                className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/12 text-primary"
+              >
+                <FlaskConical className="size-5" />
+              </span>
+              <span>
+                <CardTitle>Retrieval Metrics</CardTitle>
+                <CardDescription className="mt-1">
+                  Check how well matching ranks the mentors you know are right for a profile.
+                </CardDescription>
+              </span>
             </span>
-            <ChevronDown
-              className={cn(
-                "h-5 w-5 shrink-0 text-muted-foreground transition-transform duration-200",
-                open && "rotate-180"
-              )}
-              aria-hidden="true"
-            />
+            <motion.span
+              animate={{ rotate: open ? 180 : 0 }}
+              transition={{ type: "spring", stiffness: 400, damping: 28 }}
+              className="flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
+            >
+              <ChevronDown className="size-4" aria-hidden="true" />
+            </motion.span>
           </button>
         </CardHeader>
 
@@ -181,7 +186,7 @@ export function RetrievalMetrics() {
                       id="eval-profile"
                       rows={8}
                       spellCheck={false}
-                      className="font-mono text-xs"
+                      className="bg-muted/40 font-mono text-xs leading-relaxed"
                       value={profileJson}
                       onChange={(e) => setProfileJson(e.target.value)}
                       aria-invalid={Boolean(errors.profile) || undefined}
@@ -225,7 +230,7 @@ export function RetrievalMetrics() {
 
                 {results && (
                   <div className="mt-8" aria-live="polite">
-                    <Stagger className="grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
+                    <Stagger className="grid gap-3 sm:grid-cols-3 lg:grid-cols-5" stagger={0.06}>
                       {METRICS.map((m) => (
                         <MetricCard
                           key={m.key}
@@ -235,12 +240,14 @@ export function RetrievalMetrics() {
                         />
                       ))}
                     </Stagger>
-                    <MetricsChart
-                    data={METRICS.map((m) => ({
-                      metric: m.label,
-                      value: Number(results[m.key] ?? 0),
-                    }))}
-                  />
+                    <div className="mt-6">
+                      <MetricsChart
+                        data={METRICS.map((m) => ({
+                          metric: m.label,
+                          value: Number(results[m.key] ?? 0),
+                        }))}
+                      />
+                    </div>
                     {Array.isArray(results.top_5_mentor_ids) && results.top_5_mentor_ids.length > 0 && (
                       <p className="mt-4 text-xs text-muted-foreground break-all">
                         Top 5 returned:{" "}

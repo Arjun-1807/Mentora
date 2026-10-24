@@ -2,34 +2,41 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 /**
- * Display label + colour classes for every match status. Shared so tables,
- * cards and dialogs all agree (see CONTRACT: match status vocabulary).
+ * Display label + badge tone for every match status. Shared so tables, cards
+ * and dialogs all agree (see CONTRACT: match status vocabulary). `className`
+ * is kept for callers that style their own chips from this map.
  */
 export const STATUS_STYLES = {
-  pending: { label: "Pending", className: "bg-muted text-muted-foreground border-transparent" },
-  emailed: {
-    label: "Email Sent",
-    className: "bg-sky-500/15 text-sky-300 border-sky-500/30",
+  pending: {
+    label: "Pending",
+    variant: "secondary",
+    className: "border-border bg-muted text-muted-foreground",
   },
+  emailed: { label: "Email Sent", variant: "info", className: "border-info/25 bg-info/12 text-info" },
   email_sent: {
     label: "Email Sent",
-    className: "bg-sky-500/15 text-sky-300 border-sky-500/30",
+    variant: "info",
+    className: "border-info/25 bg-info/12 text-info",
   },
   accepted: {
     label: "Accepted",
-    className: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
+    variant: "success",
+    className: "border-success/25 bg-success/12 text-success",
   },
   declined: {
     label: "Declined",
-    className: "bg-red-500/15 text-red-300 border-red-500/30",
+    variant: "danger",
+    className: "border-destructive/25 bg-destructive/12 text-destructive",
   },
   meeting_scheduled: {
     label: "Meeting Scheduled",
-    className: "bg-violet-500/15 text-violet-300 border-violet-500/30",
+    variant: "soft",
+    className: "border-primary/25 bg-primary/12 text-primary",
   },
   completed: {
     label: "Completed",
-    className: "bg-transparent text-emerald-300 border-emerald-500/60",
+    variant: "success",
+    className: "border-success/50 bg-transparent text-success",
   },
 };
 
@@ -43,10 +50,12 @@ export function statusLabel(status) {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+/** Status pill with a small leading dot in the status colour. */
 export default function StatusBadge({ status, className }) {
   const style = STATUS_STYLES[status] || STATUS_STYLES.pending;
   return (
-    <Badge variant="outline" className={cn(style.className, className)}>
+    <Badge variant="outline" className={cn("gap-1.5", style.className, className)}>
+      <span aria-hidden="true" className="size-1.5 rounded-full bg-current" />
       {statusLabel(status)}
     </Badge>
   );

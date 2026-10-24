@@ -1,16 +1,20 @@
-import { Inter } from "next/font/google";
+import { GeistSans } from "geist/font/sans";
+import { GeistMono } from "geist/font/mono";
+import { Instrument_Serif } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 import Navbar from "@/components/layout/Navbar";
+import Backdrop from "@/components/layout/Backdrop";
 import PageTransition from "@/components/PageTransition";
+import ThemeProvider from "@/components/theme/ThemeProvider";
 
-// Self-hosted by next/font; exposed as --font-inter, which globals.css maps
-// onto Tailwind's --font-sans.
-const inter = Inter({
+// Editorial serif, used only for italic accent words in display headings.
+const instrumentSerif = Instrument_Serif({
   subsets: ["latin"],
-  weight: ["300", "400", "500", "600", "700", "800"],
+  weight: "400",
+  style: ["normal", "italic"],
   display: "swap",
-  variable: "--font-inter",
+  variable: "--font-instrument-serif",
 });
 
 export const metadata = {
@@ -22,18 +26,32 @@ export const metadata = {
     "Mentora uses AI to match startups with domain-expert mentors — from pitch deck to personalised intro, in seconds.",
 };
 
+export const viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f9f9fc" },
+    { media: "(prefers-color-scheme: dark)", color: "#0e0f1a" },
+  ],
+};
+
 export default function RootLayout({ children }) {
   return (
-    <html lang="en" className={`dark ${inter.variable}`} suppressHydrationWarning>
+    <html
+      lang="en"
+      className={`${GeistSans.variable} ${GeistMono.variable} ${instrumentSerif.variable}`}
+      suppressHydrationWarning
+    >
       <body className="min-h-screen bg-background text-foreground antialiased font-sans">
-        <div className="min-h-screen flex flex-col">
-          {/* The navbar lives outside the transition so it stays put while
-              page content animates between routes. It hides itself on routes
-              that bring their own chrome. */}
-          <Navbar />
-          <PageTransition>{children}</PageTransition>
-        </div>
-        <Toaster richColors position="top-center" theme="dark" />
+        <ThemeProvider>
+          <Backdrop />
+          <div className="relative min-h-screen flex flex-col">
+            {/* The navbar lives outside the transition so it stays put while
+                page content animates between routes. It hides itself on
+                routes that bring their own chrome. */}
+            <Navbar />
+            <PageTransition>{children}</PageTransition>
+          </div>
+          <Toaster position="top-center" />
+        </ThemeProvider>
       </body>
     </html>
   );
